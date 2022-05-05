@@ -21,15 +21,15 @@ pipeline {
                 axes {
                     axis {
                         name 'PLATFORM'
-                        values 'centos7', 'macos', 'm1', 'alpine', 'qe-grav2-amzn2', 'amzn2', 'ubuntu20', 'windows'
+                        values /* 'centos7', 'macos', 'm1', 'alpine', 'qe-grav2-amzn2', 'amzn2', 'ubuntu20', */ 'windows'
                     }
                     axis {
                         name 'CB_PHP_VERSION'
-                        values '8.1.4', '8.0.17'
+                        values '8.1.4' // , '8.0.17'
                     }
                     axis {
                         name 'THREAD_SAFETY'
-                        values 'nts', 'zts'
+                        values 'nts' // , 'zts'
                     }
                 }
                 agent { label PLATFORM }
@@ -78,9 +78,16 @@ pipeline {
                             }
                         }
                     }
-                    stage("stash") {
+                    stage("pkg") {
                         steps {
-                            stash(includes: "php-build/", name: "stash-${PLATFORM}-${CB_PHP_VERSION}-${THREAD_SAFETY}-${BUILD_NUMBER}", useDefaultExcludes: false)
+                            dir("php-build") {
+                                if (!isUnix()) {
+                                    bat("ruby bin/win-package")
+                                    dir("build") {
+                                        archiveArtifacts(artifacts: "*.zip", fingerprint: true)
+                                    }
+                                }
+                            }
                         }
                     }
                     stage("test") {
@@ -251,11 +258,9 @@ def build_sdk() {
     if (isUnix()) {
         execute("ruby bin/build")
     } else {
+        bat("dir C:\php\php-nts-default-8.1.4-cb1\ext")
         bat("""
-        call "%PROGRAMFILES(X86)%\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86_amd64
-        phpize
-        configure --enable-couchbase
-        nmake
+        call "%PROGRAMFILES(X86)%\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86_amd64 && phpize && configure --enable-couchbase && nmake
         """)
     }
 }
