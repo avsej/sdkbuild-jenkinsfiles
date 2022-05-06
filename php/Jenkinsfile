@@ -1,3 +1,4 @@
+// vim:ft=groovy
 pipeline {
     agent none
     parameters {
@@ -25,11 +26,11 @@ pipeline {
                     }
                     axis {
                         name 'CB_PHP_VERSION'
-                        values '8.1.4' // , '8.0.17'
+                        values '8.1.4', '8.0.17'
                     }
                     axis {
                         name 'THREAD_SAFETY'
-                        values 'nts' // , 'zts'
+                        values 'nts', 'zts'
                     }
                 }
                 agent { label PLATFORM }
@@ -81,11 +82,13 @@ pipeline {
                     stage("pkg") {
                         steps {
                             dir("php-build") {
-                                if (!isUnix()) {
-                                    bat("ruby bin/win-package")
-                                    dir("build") {
-                                        archiveArtifacts(artifacts: "*.zip", fingerprint: true)
-                                    }
+                                withEnv(calculate_env(PLATFORM, CB_PHP_VERSION, THREAD_SAFETY)) {
+                                    execute("ruby bin/win-package")
+                                }
+                                dir("build") {
+                                    archiveArtifacts(artifacts: "php_couchbase-*.zip", fingerprint: true)
+                                    archiveArtifacts(artifacts: "verification.zip", fingerprint: true)
+                                    stash(name: "tests-${PLATFORM}-${CB_PHP_VERSION}-${THREAD_SAFETY}", includes: "verification/")
                                 }
                             }
                         }
@@ -98,7 +101,9 @@ pipeline {
                             COUCHBASE_LOG_LEVEL = 'trace'
                         }
                         steps {
-                            dir("php-build") {
+                            unstash(name: "tests-${PLATFORM}-${CB_PHP_VERSION}-${THREAD_SAFETY}")
+                            dir("verification") {
+bat("dir .");
                                 withEnv(calculate_env(PLATFORM, CB_PHP_VERSION, THREAD_SAFETY)) {
                                     execute("ruby bin/test")
                                 }
@@ -106,31 +111,10 @@ pipeline {
                         }
                         post {
                             always {
-                                junit("php-build/results.xml")
+                                junit(testResults: "php-build/results.xml", allowEmptyResults: true)
                             }
                         }
                     }
-                    // stage("package") {
-                    //     steps {
-                    //         dir("build-${PLATFORM}-${CB_PHP_VERSION}-${BUILD_NUMBER}") {
-                    //             withEnv(calculate_env(PLATFORM, CB_PHP_VERSION)) {
-                    //                 // TODO: change script to work with ruby <2.5
-                    //                 sh("sed -i -s 's/~//' bin/package")
-                    //                 execute("ruby bin/package")
-                    //                 stash(name: "pecl-${PLATFORM}-${CB_PHP_VERSION}", includes: "*.tgz")
-                    //             }
-                    //         }
-                    //     }
-                    // }
-                    // stage("pecl install") {
-                    //     steps {
-                    //         dir("build-${PLATFORM}-${CB_PHP_VERSION}-${BUILD_NUMBER}") {
-                    //             withEnv(calculate_env(PLATFORM, CB_PHP_VERSION)) {
-                    //                 execute("pecl install couchbase-4.0.0.tgz")
-                    //             }
-                    //         }
-                    //     }
-                    // }
                 }
             }
         }
@@ -258,9 +242,11 @@ def build_sdk() {
     if (isUnix()) {
         execute("ruby bin/build")
     } else {
-        bat("dir C:\php\php-nts-default-8.1.4-cb1\ext")
         bat("""
-        call "%PROGRAMFILES(X86)%\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86_amd64 && phpize && configure --enable-couchbase && nmake
+        call "%PROGRAMFILES(X86)%\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86_amd64
+        """)
+        bat("""
+        call "%PROGRAMFILES(X86)%\\Microsoft Visual Studio\\2019\\Professional\\VC\\Auxiliary\\Build\\vcvarsall.bat" x86_amd64 && echo "vars loaded" && phpize && echo "phpize executed" && configure --enable-couchbase && echo "configure executed" && nmake
         """)
     }
 }
@@ -269,7 +255,7 @@ def calculate_env(platform, php_version, thread_safety) {
     def curr_dir = pwd()
     def phpPrefix = "${curr_dir}/install/php-${thread_safety}-${php_version}"
     if (!isUnix()) {
-        phpPrefix = "C:\\php\\php-${thread_safety}-${php_version}-cb1"
+        phpPrefix = "C:\\php\\php-${thread_safety}-default-${php_version}-cb1"
     }
     def path = PATH
     def envs = ["CB_PHP_PREFIX=${phpPrefix}"]
@@ -297,6 +283,9 @@ def calculate_env(platform, php_version, thread_safety) {
     }
     if (platform == "windows") {
         path = "${curr_dir}/install/openssl-1.1.1g-sdk2;${path}"
+    }
+    if (platform == "windows") {
+        path = "${curr_dir};${path}"
     }
     if (platform == "windows") {
         def rubyPath = "C:\\tools\\ruby31\\bin"
@@ -334,7 +323,7 @@ def install_php(php_version, thread_safety) {
         sh("cbdep --debug install php-${thread_safety} ${php_version} -c cbdep.config")
     } else {
         def curr_dir = pwd()
-        bat("cbdep --debug install php-${thread_safety} ${php_version}-cb1 -c cbdep.config")
+        bat("cbdep --debug install php-${thread_safety}-default ${php_version}-cb1")
     }
 }
 
