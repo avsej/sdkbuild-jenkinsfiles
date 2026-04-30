@@ -1,0 +1,11 @@
+{
+  "version": "v0.0.114",
+  "sha256": {
+    "cbdinocluster-darwin-amd64": "66d183eac19593c2640b10fdc52cabaa0e2cef61fed2ebc614187a8788ee2653",
+    "cbdinocluster-darwin-arm64": "cbede12f08bc25b7c3e1e4e74057f52065712bcb67ad4e61982d3dc10bdf5dc3",
+    "cbdinocluster-linux-amd64": "87a24ca2c3c857d49c0ea450a5bab648fcd56f66568657ee7c4c0def22b90fd6",
+    "cbdinocluster-linux-arm64": "6b552b8a12075314b414840dabd2cb8ed0c04e58f0ad36aaa215af1a7910b24f",
+    "cbdinocluster-windows-amd64.exe": "0c7a3ba8f882b5e95322b4c01f9220a8edd03eb1b59fe4701d571341f49446db",
+    "cbdinocluster-windows-arm64.exe": "c44d77473ba027943f5178aea4dd729ab1f4ba677d8c2ecce9e56856cbc46cc8"
+  }
+}
