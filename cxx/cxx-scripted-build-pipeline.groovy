@@ -329,6 +329,32 @@ def ensureDiskSpace(int minGB) {
 }
 
 
+// Returns the chosen CB_NUMBER_OF_JOBS for this agent (cores - 2, min
+// 1) as a String for env interpolation. Self-reports cores detected +
+// jobs chosen to stderr so the build log records which agent provided
+// which capacity. Stdout carries the integer (captured by Groovy via
+// returnStdout); stderr is the human-readable explanation. Pure
+// sh / powershell — no Python dependency. See
+// cxx-pipeline-disk-defense-design.md §C.
+def computeJobs() {
+    if (isUnix()) {
+        return sh(returnStdout: true, script: '''
+            cores=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)
+            jobs=$(( cores > 2 ? cores - 2 : 1 ))
+            echo "computeJobs: $cores cores detected on ${NODE_NAME:-?}, using $jobs parallel jobs (cores - 2, min 1)" >&2
+            echo $jobs
+        ''').trim()
+    } else {
+        return powershell(returnStdout: true, script: '''
+            $cores = [int]$env:NUMBER_OF_PROCESSORS
+            $jobs  = if ($cores -gt 2) { $cores - 2 } else { 1 }
+            [Console]::Error.WriteLine("computeJobs: $cores cores detected on $env:NODE_NAME, using $jobs parallel jobs (cores - 2, min 1)")
+            Write-Output $jobs
+        ''').trim()
+    }
+}
+
+
 stage("prepare and validate") {
     node(TARBALL_LABEL) {
         script {
