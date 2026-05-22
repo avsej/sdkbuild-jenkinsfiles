@@ -1,3 +1,19 @@
+// Pipeline-wide retention cap. Bounds Jenkins controller disk usage:
+// each build's logs / archived artifacts release their footprint
+// automatically. numToKeepStr caps build-log retention; artifactNum-
+// KeepStr caps the heavier per-build artifact retention (which
+// dominates the on-disk footprint after archiveArtifacts of CMake
+// logs and cbdinocluster collect-logs zips); daysToKeepStr is the
+// hard cap. Tune via job-level review if anyone needs longer
+// comparison windows. See cxx-pipeline-disk-defense-design.md §D.
+properties([
+    buildDiscarder(logRotator(
+        numToKeepStr: '50',
+        artifactNumToKeepStr: '10',
+        daysToKeepStr: '30'
+    ))
+])
+
 def CMAKE_VERSION = "3.31.8"
 
 // cbdinocluster version + per-asset SHA-256 map live in cxx/scripts/cbdinocluster.json
