@@ -539,7 +539,12 @@ stage("build") {
                     }
                 }
                 stage("build") {
-                    def envs = ["CB_NUMBER_OF_JOBS=4"]
+                    // Per-agent parallelism via computeJobs() (cores - 2, min 1). Replaces
+                    // the previous CB_NUMBER_OF_JOBS=4 hardcode that capped every platform
+                    // at 4-wide regardless of agent size. Self-reports cores detected +
+                    // jobs chosen to the build log. See cxx-pipeline-disk-defense-design.md
+                    // §2 + §C.
+                    def envs = ["CB_NUMBER_OF_JOBS=${computeJobs()}"]
                     if (platform == "macos14-amd64") {
                         envs.push("OPENSSL_ROOT_DIR=/usr/local/opt/openssl")
                     } else if (platform == "macos15-arm64") {
