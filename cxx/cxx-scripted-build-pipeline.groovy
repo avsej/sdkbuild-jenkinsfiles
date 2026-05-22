@@ -295,6 +295,40 @@ def ensureCmake() {
 }
 
 
+// Hard-gate workspace free space. Pure sh / powershell so this can
+// run BEFORE ensurePython() if needed — preflight should not depend
+// on Python being present. Always prints the measured number on
+// success so capacity planning has data without ad-hoc
+// instrumentation. On failure: non-zero exit with a clear message
+// including node name, observed free GB, and threshold. Per-platform
+// thresholds live in DISK_THRESHOLD_GB / INTEGRATION_DISK_THRESHOLD_GB
+// at the top of the file. See cxx-pipeline-disk-defense-design.md §A.
+def ensureDiskSpace(int minGB) {
+    if (isUnix()) {
+        sh """
+            set -euo pipefail
+            free_kb=\$(df -k . | tail -1 | awk '{print \$4}')
+            free_gb=\$((free_kb / 1024 / 1024))
+            echo "ensureDiskSpace: \$free_gb GB free on workspace drive (node=\${NODE_NAME:-?}, threshold=${minGB} GB)"
+            if [ "\$free_gb" -lt ${minGB} ]; then
+                echo "ERROR: insufficient disk on \${NODE_NAME:-?} (\$free_gb GB free, need >= ${minGB} GB). Failing fast so another agent can take this build." >&2
+                exit 1
+            fi
+        """
+    } else {
+        powershell """
+            \$ErrorActionPreference = 'Stop'
+            \$drive   = (Get-Location).Drive.Name
+            \$free_gb = [int][math]::Floor((Get-PSDrive -Name \$drive).Free / 1GB)
+            Write-Host "ensureDiskSpace: \$free_gb GB free on workspace drive (node=\$env:NODE_NAME, drive=\${drive}:, threshold=${minGB} GB)"
+            if (\$free_gb -lt ${minGB}) {
+                throw "insufficient disk on \$env:NODE_NAME (\$free_gb GB free, need >= ${minGB} GB). Failing fast so another agent can take this build."
+            }
+        """
+    }
+}
+
+
 stage("prepare and validate") {
     node(TARBALL_LABEL) {
         script {
