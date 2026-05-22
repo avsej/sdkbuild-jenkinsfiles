@@ -768,6 +768,12 @@ if (!SKIP_TESTS.toBoolean()) {
                             // (bring-up hang vs test hang) immediately legible in the build log.
                             timeout(unit: 'MINUTES', time: 15) {
                             deleteDir()
+                            // Pre-flight disk gate. INTEGRATION_DISK_THRESHOLD_GB covers
+                            // 3× CB server Docker images (~1.5 GB each) + cluster runtime
+                            // data + build artifact unstash. Runs after deleteDir() so the
+                            // prior workspace has been freed, before checkoutPipelineRepo()
+                            // adds the script clone. See cxx-pipeline-disk-defense-design.md §3.
+                            ensureDiskSpace(INTEGRATION_DISK_THRESHOLD_GB)
                             // Clone the Jenkinsfile's repo into pipeline-scripts/ so the
                             // installer and extract_cert.py scripts under cxx/scripts/ are
                             // reachable. Must precede ensureCbdinocluster() and any cert
