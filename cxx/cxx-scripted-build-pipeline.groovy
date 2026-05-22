@@ -452,6 +452,13 @@ stage("build") {
                 timeout(unit: 'MINUTES', time: 45) {
                 stage("prep") {
                     reportExecutingNode()
+
+                    // Pre-flight disk gate. Per-platform threshold from DISK_THRESHOLD_GB
+                    // (msvc-2022: 40 GB for gRPC+protobuf+boringssl PDB output; others: 15 GB).
+                    // Fails in ~5 s if the agent is full instead of after ~20 min of compile
+                    // work — see cxx-pipeline-disk-defense-design.md §1.
+                    ensureDiskSpace(DISK_THRESHOLD_GB[platform])
+
                     // Per-node toolchain report: what THIS build node actually has, not just what
                     // prepare-and-validate saw. Best-effort — missing tools never fail the stage.
                     // Goal: when a build breaks on one platform, the build log already records the
