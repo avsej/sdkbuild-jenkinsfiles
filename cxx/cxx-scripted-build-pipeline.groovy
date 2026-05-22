@@ -467,6 +467,7 @@ stage("build") {
                             & cmake --version 2>&1 | Select-Object -First 1
                             & git --version 2>&1
                             "PowerShell $($PSVersionTable.PSVersion)"
+                            "cores: $env:NUMBER_OF_PROCESSORS"
                             $py = Get-Command python -ErrorAction SilentlyContinue
                             if ($py) {
                                 "python at $($py.Source)"
@@ -502,6 +503,7 @@ stage("build") {
                             git --version       2>/dev/null
                             make --version      2>/dev/null | head -1
                             python3 --version   2>/dev/null
+                            echo "cores: $(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null)"
                             exit 0
                         '''
                     }
