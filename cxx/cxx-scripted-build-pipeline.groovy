@@ -1003,6 +1003,11 @@ expiry: 4h
                         // rationale as the docker stage above.
                         timeout(unit: 'MINUTES', time: 15) {
                         deleteDir()
+                        // Same pre-flight as the docker stage — see Task 8 / design §3.
+                        // The Capella deployer doesn't pull Docker images locally, but the
+                        // sdkqe agent may still be tight on disk after prior builds, and
+                        // a consistent gate everywhere keeps the trade-off legible.
+                        ensureDiskSpace(INTEGRATION_DISK_THRESHOLD_GB)
                         // Clone pipeline-scripts/ (see docker stage above for rationale).
                         checkoutPipelineRepo()
 
