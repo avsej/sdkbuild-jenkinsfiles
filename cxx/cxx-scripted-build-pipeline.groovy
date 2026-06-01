@@ -207,7 +207,12 @@ stage("prepare and validate") {
             sh "cp couchbase-cxx-client/build/packaging/couchbase-cxx-client-*.tar.gz tarball.tar.gz"
         }
 
+        // Stash uses a stable name so each build node can unstash "tarball"
+        // without knowing the version. The archive keeps the versioned
+        // filename customers see in releases, so the Jenkins UI download
+        // is byte-identical to the published source tarball.
         stash includes: "tarball.tar.gz", name: "tarball"
+        archiveArtifacts artifacts: "couchbase-cxx-client/build/packaging/couchbase-cxx-client-*.tar.gz", fingerprint: true
     }
 }
 
@@ -377,17 +382,17 @@ stage("build") {
                                 }
                             }
                         } catch (buildErr) {
-                            // CMake configure failures land in CMakeError.log; the compile output
-                            // that streamed past the user's console-log scrollback lives in
-                            // CMakeOutput.log; CMakeCache.txt has the resolved configure-time
-                            // values. Together they're enough to triage a broken matrix branch
-                            // without re-running the build. allowEmptyArchive keeps a failed-but-
-                            // produced-no-logs case (e.g. failFast-induced interrupt before any
-                            // CMake invocation) from itself throwing and clobbering buildErr.
-                            // Linux puts these under cmake-build-tests/, msvc-2022 under build/ —
-                            // the ** glob catches both.
+                            // cmake >= 3.26 writes an aggregated structured configure log to
+                            // CMakeFiles/CMakeConfigureLog.yaml — supersedes CMakeError.log +
+                            // CMakeOutput.log + CMakeCache.txt as a triage artifact. Linux/macOS
+                            // build dir is cmake-build-tests/, msvc-2022 is build/; ** picks up
+                            // the top-level YAML plus one per FetchContent sub-build, which is
+                            // exactly what you want when configure fails mid-sub-project.
+                            // allowEmptyArchive keeps a failed-but-produced-no-logs case (e.g.
+                            // failFast-induced interrupt before cmake ran) from itself throwing
+                            // and clobbering buildErr.
                             archiveArtifacts(
-                                artifacts: "ws_${platform}/couchbase-cxx-client/**/CMakeError.log,ws_${platform}/couchbase-cxx-client/**/CMakeOutput.log,ws_${platform}/couchbase-cxx-client/**/CMakeCache.txt",
+                                artifacts: "ws_${platform}/couchbase-cxx-client/cmake-build-tests/**/CMakeConfigureLog.yaml,ws_${platform}/couchbase-cxx-client/build/**/CMakeConfigureLog.yaml",
                                 allowEmptyArchive: true,
                                 onlyIfSuccessful: false
                             )

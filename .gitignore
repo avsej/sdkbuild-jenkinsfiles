@@ -1,6 +1,7 @@
 *.iml
 .idea
 cmake-build-debug
+build*/
 
 # Python
 .venv/
