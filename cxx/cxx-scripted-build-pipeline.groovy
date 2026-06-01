@@ -49,14 +49,24 @@ if (USE_CE.toBoolean()) {
     CB_VERSIONS["70release"] = [tag: "7.0-release"]
 }
 def COMBINATION_PLATFORM = "rocky9-amd64"
-// The source tarball is platform- and binary-independent (just
-// `git ls-files` + a vendored CPM cache, reproducibly archived). Any
-// agent with cmake + git + python is qualified to produce it, so accept
-// both the bare build-agent label (<executor>) and the test-agent label
-// (sdkqe-<executor>). The other COMBINATION_PLATFORM stages — unit
-// tests, integration-test cluster bring-up, Capella — consume the
-// platform-specific build binary or need the test-agent toolchain
-// (docker, cbdinocluster), and intentionally stay strict on sdkqe-.
+// Every node(...) expression in this file is a Jenkins LABEL, not a node
+// identifier — and a label can match multiple physical agents. Jenkins
+// picks one matching agent when a node() block enters; a SECOND node()
+// with the same label may land on a DIFFERENT physical agent. So any
+// state that must travel across stage boundaries either lives inside a
+// single node() block (which is locked to one physical agent for its
+// duration) or moves through stash / archiveArtifacts, which are
+// content-addressed and routed via the Jenkins controller.
+//
+// The source tarball is platform- and binary-independent and is handed
+// off via stash + archiveArtifacts (see the prepare-and-validate stage),
+// so its prep node can use a wider pool: both the bare build-agent label
+// (<executor>) and the test-agent label (sdkqe-<executor>). The other
+// COMBINATION_PLATFORM stages — unit tests, integration-test cluster
+// bring-up, Capella — consume the platform-specific build binary or need
+// the test-agent toolchain (docker, cbdinocluster) and stay strict on
+// sdkqe-. Their bring-up + test + cleanup also stay inside one node()
+// block; see the cbverStages comments for why.
 def TARBALL_LABEL = "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 
 
