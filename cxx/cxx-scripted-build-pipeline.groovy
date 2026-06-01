@@ -5,15 +5,25 @@ def CMAKE_VERSION = "3.31.8"
 // a single-file edit there — version and every digest in lockstep. See ensureCbdinocluster()
 // below for how the script is invoked from each agent.
 
+// TODO(TD-10): expose PLATFORMS as a Jenkins job parameter (multi-select
+//              list of user-facing platform names) with an internal map
+//              from platform name to executor label. Today the platform
+//              name doubles as the node label AND the stash-key prefix,
+//              so narrowing the matrix for iteration breaks any stage
+//              that dereferences ${COMBINATION_PLATFORM}_build. The
+//              decoupling also lets contributors pick platforms from the
+//              job form without editing this file.
 def PLATFORMS = [
-    "rockylinux9",
-    "macos", // sonoma
-    "m1",  // sequoia
+    // Temporarily reduced to alpine3.21-only for faster iteration while
+    // debugging the matrix. Restore the full list before merging.
     "alpine3.21",
-    "msvc-2022",
-    "qe-rhel9-arm64",
-    "qe-ubuntu24-amd64",
-    "qe-ubuntu24-arm64"
+    // "rockylinux9",
+    // "macos", // sonoma
+    // "m1",  // sequoia
+    // "msvc-2022",
+    // "qe-rhel9-arm64",
+    // "qe-ubuntu24-amd64",
+    // "qe-ubuntu24-arm64",
 ]
 def CB_VERSIONS = [
     "71release": [tag: "7.1-release"],
