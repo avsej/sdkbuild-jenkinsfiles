@@ -5,26 +5,36 @@ def CMAKE_VERSION = "3.31.8"
 // a single-file edit there — version and every digest in lockstep. See ensureCbdinocluster()
 // below for how the script is invoked from each agent.
 
-// TODO(TD-10): expose PLATFORMS as a Jenkins job parameter (multi-select
-//              list of user-facing platform names) with an internal map
-//              from platform name to executor label. Today the platform
-//              name doubles as the node label AND the stash-key prefix,
-//              so narrowing the matrix for iteration breaks any stage
-//              that dereferences ${COMBINATION_PLATFORM}_build. The
-//              decoupling also lets contributors pick platforms from the
-//              job form without editing this file.
-def PLATFORMS = [
-    // Temporarily reduced to alpine3.21-only for faster iteration while
-    // debugging the matrix. Restore the full list before merging.
-    "alpine3.21",
-    // "rockylinux9",
-    // "macos", // sonoma
-    // "m1",  // sequoia
-    // "msvc-2022",
-    // "qe-rhel9-arm64",
-    // "qe-ubuntu24-amd64",
-    // "qe-ubuntu24-arm64",
+// User-facing platform IDs (matrix entries; also the Jenkins job's
+// PLATFORM choice parameter values) → Jenkins executor labels. The
+// indirection lets the executor pool change without renaming what users
+// pick in the build form, and removes the "what is m1?" / "is qe- part
+// of the name?" surprises that the bare executor labels carry.
+def PLATFORM_EXECUTOR = [
+    "alpine3.21-amd64": "alpine3.21",
+    "rocky9-amd64":     "rockylinux9",
+    "ubuntu24-amd64":   "qe-ubuntu24-amd64",
+    "rhel9-arm64":      "qe-rhel9-arm64",
+    "ubuntu24-arm64":   "qe-ubuntu24-arm64",
+    "macos14-amd64":    "macos",       // Sonoma
+    "macos15-arm64":    "m1",          // Sequoia
+    "win2022-amd64":    "msvc-2022",
 ]
+
+// Resolve the PLATFORM Jenkins job parameter into the matrix entries
+// this build will run. The job config exposes a Choice parameter whose
+// values are the PLATFORM_EXECUTOR keys plus the literal "ALL", which
+// is the default. "ALL" (and a defensively-handled empty value) expand
+// to the full map; a specific platform ID narrows the matrix to one;
+// anything else fails fast before any agent is allocated.
+def PLATFORMS
+if (!PLATFORM || PLATFORM == "ALL") {
+    PLATFORMS = PLATFORM_EXECUTOR.keySet().toList()
+} else if (PLATFORM_EXECUTOR.containsKey(PLATFORM)) {
+    PLATFORMS = [PLATFORM]
+} else {
+    error("Unknown PLATFORM '${PLATFORM}'. Choose one of: ALL, ${PLATFORM_EXECUTOR.keySet().join(', ')}.")
+}
 def CB_VERSIONS = [
     "71release": [tag: "7.1-release"],
     "72stable": [tag: "7.2-stable"],
@@ -38,7 +48,7 @@ if (USE_CE.toBoolean()) {
 } else {
     CB_VERSIONS["70release"] = [tag: "7.0-release"]
 }
-def COMBINATION_PLATFORM = "rockylinux9"
+def COMBINATION_PLATFORM = "rocky9-amd64"
 
 
 def checkout() {
@@ -149,7 +159,7 @@ def ensurePython() {
 
 
 stage("prepare and validate") {
-    node("sdkqe-$COMBINATION_PLATFORM") {
+    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
         script {
             buildName([
                 BUILD_NUMBER,
@@ -232,7 +242,7 @@ stage("build") {
     for (p in PLATFORMS) {
         def platform = p
         builds[platform] = {
-            node(platform) {
+            node(PLATFORM_EXECUTOR[platform]) {
                 // Per-platform timeout: a single hung node (network stall on a CPM fetch,
                 // runaway compile, deadlocked test agent) shouldn't starve the rest of the
                 // matrix of the outer 60-min budget. 45 min is comfortably above observed
@@ -245,7 +255,7 @@ stage("build") {
                     // Goal: when a build breaks on one platform, the build log already records the
                     // exact gcc/clang/cmake (and cl.exe on Windows, where reachable) it ran with,
                     // so triage doesn't require agent-image archaeology.
-                    if (platform == "msvc-2022") {
+                    if (platform == "win2022-amd64") {
                         powershell '''
                             Write-Host "===== OS / kernel ====="
                             [System.Environment]::OSVersion.ToString()
@@ -300,7 +310,7 @@ stage("build") {
                         // the versioned top-level directory (couchbase-cxx-client-${SEMVER}/).
                         // Windows 10/11 and Server 2019+ ship bsdtar at C:\Windows\System32\tar.exe,
                         // which handles -xzf and --strip-components identically to GNU tar.
-                        if (platform == "msvc-2022") {
+                        if (platform == "win2022-amd64") {
                             powershell '''
                                 $ErrorActionPreference = 'Stop'
                                 New-Item -ItemType Directory -Force -Path couchbase-cxx-client | Out-Null
@@ -319,16 +329,16 @@ stage("build") {
                 }
                 stage("build") {
                     def envs = ["CB_NUMBER_OF_JOBS=4"]
-                    if (platform == "macos") {
+                    if (platform == "macos14-amd64") {
                         envs.push("OPENSSL_ROOT_DIR=/usr/local/opt/openssl")
-                    } else if (platform == "m1") {
+                    } else if (platform == "macos15-arm64") {
                         envs.push("OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl")
-                    } else if (platform == "rockylinux9") {
+                    } else if (platform == "rocky9-amd64") {
                         envs.push("CB_CC=gcc")
                         envs.push("CB_CXX=g++")
                     }
                     def path = PATH
-                    if (platform == "msvc-2022") {
+                    if (platform == "win2022-amd64") {
                         // BoringSSL is statically linked (-DCOUCHBASE_CXX_CLIENT_STATIC_BORINGSSL=ON),
                         // so no separate OpenSSL install is required on Windows.
                         // TODO(TD-04): verify on the msvc-2022 agent that (a) winget is available
@@ -351,7 +361,7 @@ stage("build") {
                             }
                         """
                         path = "C:\\Program Files\\CMake\\bin;" + path
-                    } else if (platform == "macos" || platform == "m1") {
+                    } else if (platform == "macos14-amd64" || platform == "macos15-arm64") {
                         // macOS uses Homebrew's cmake. Fail loud if it's not installed — agents
                         // should be provisioned ahead of the build with `brew install cmake`, and
                         // a missing dep ought to abort here rather than be hidden by an
@@ -368,7 +378,7 @@ stage("build") {
                             echo "Using Homebrew cmake: $(brew list --versions cmake)"
                         '''
                         // Apple Silicon: /opt/homebrew/bin; Intel macOS: /usr/local/bin.
-                        def brewBin = (platform == "m1") ? "/opt/homebrew/bin" : "/usr/local/bin"
+                        def brewBin = (platform == "macos15-arm64") ? "/opt/homebrew/bin" : "/usr/local/bin"
                         path = "${brewBin}:" + path
                     }
                     echo("PATH=$path")
@@ -376,7 +386,7 @@ stage("build") {
                     withEnv(envs) {
                         try {
                             dir("ws_${platform}/couchbase-cxx-client") {
-                                if (platform == "msvc-2022") {
+                                if (platform == "win2022-amd64") {
                                     powershell '''
                                         cmake --version
                                         if ($LASTEXITCODE -ne 0) { throw "cmake --version failed ($LASTEXITCODE)" }
@@ -479,7 +489,7 @@ class DynamicCluster {
 
 
 if (!SKIP_TESTS.toBoolean()) {
-    node("sdkqe-$COMBINATION_PLATFORM") {
+    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
                 unstash("${COMBINATION_PLATFORM}_build")
@@ -512,7 +522,7 @@ if (!SKIP_TESTS.toBoolean()) {
                 label = v["label"]
             }
             cbverStages["${COMBINATION_PLATFORM}-${label}"] = {
-                node("sdkqe-$COMBINATION_PLATFORM") {
+                node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                     def CLUSTER = new DynamicCluster(version)
                     try {
                         stage(label) {
@@ -737,7 +747,7 @@ expiry: 4h
             }
         }
         cbverStages["${COMBINATION_PLATFORM}-capella"] = {
-            node("sdkqe-$COMBINATION_PLATFORM") {
+            node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
