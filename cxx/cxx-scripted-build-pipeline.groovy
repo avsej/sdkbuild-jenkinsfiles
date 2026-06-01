@@ -49,6 +49,12 @@ if (USE_CE.toBoolean()) {
     CB_VERSIONS["70release"] = [tag: "7.0-release"]
 }
 def COMBINATION_PLATFORM = "rocky9-amd64"
+// Combination-platform stages (prep + tarball, unit tests, integration-test
+// cluster bring-up) accept either the test-agent label (sdkqe-<executor>)
+// or the bare build-agent label (<executor>). Both agent classes carry the
+// toolchain these stages need; widening the pool reduces queueing and lets
+// infra repurpose a host without renaming its label.
+def COMBINATION_LABEL = "sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || ${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 
 
 def checkout() {
@@ -159,7 +165,7 @@ def ensurePython() {
 
 
 stage("prepare and validate") {
-    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+    node(COMBINATION_LABEL) {
         script {
             buildName([
                 BUILD_NUMBER,
@@ -489,7 +495,7 @@ class DynamicCluster {
 
 
 if (!SKIP_TESTS.toBoolean()) {
-    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+    node(COMBINATION_LABEL) {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
                 unstash("${COMBINATION_PLATFORM}_build")
@@ -522,7 +528,7 @@ if (!SKIP_TESTS.toBoolean()) {
                 label = v["label"]
             }
             cbverStages["${COMBINATION_PLATFORM}-${label}"] = {
-                node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+                node(COMBINATION_LABEL) {
                     def CLUSTER = new DynamicCluster(version)
                     try {
                         stage(label) {
@@ -747,7 +753,7 @@ expiry: 4h
             }
         }
         cbverStages["${COMBINATION_PLATFORM}-capella"] = {
-            node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+            node(COMBINATION_LABEL) {
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
