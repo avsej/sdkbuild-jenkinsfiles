@@ -49,12 +49,15 @@ if (USE_CE.toBoolean()) {
     CB_VERSIONS["70release"] = [tag: "7.0-release"]
 }
 def COMBINATION_PLATFORM = "rocky9-amd64"
-// Combination-platform stages (prep + tarball, unit tests, integration-test
-// cluster bring-up) accept either the test-agent label (sdkqe-<executor>)
-// or the bare build-agent label (<executor>). Both agent classes carry the
-// toolchain these stages need; widening the pool reduces queueing and lets
-// infra repurpose a host without renaming its label.
-def COMBINATION_LABEL = "sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || ${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
+// The source tarball is platform- and binary-independent (just
+// `git ls-files` + a vendored CPM cache, reproducibly archived). Any
+// agent with cmake + git + python is qualified to produce it, so accept
+// both the bare build-agent label (<executor>) and the test-agent label
+// (sdkqe-<executor>). The other COMBINATION_PLATFORM stages — unit
+// tests, integration-test cluster bring-up, Capella — consume the
+// platform-specific build binary or need the test-agent toolchain
+// (docker, cbdinocluster), and intentionally stay strict on sdkqe-.
+def TARBALL_LABEL = "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 
 
 def checkout() {
@@ -165,7 +168,7 @@ def ensurePython() {
 
 
 stage("prepare and validate") {
-    node(COMBINATION_LABEL) {
+    node(TARBALL_LABEL) {
         script {
             buildName([
                 BUILD_NUMBER,
@@ -495,7 +498,7 @@ class DynamicCluster {
 
 
 if (!SKIP_TESTS.toBoolean()) {
-    node(COMBINATION_LABEL) {
+    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
                 unstash("${COMBINATION_PLATFORM}_build")
@@ -528,7 +531,7 @@ if (!SKIP_TESTS.toBoolean()) {
                 label = v["label"]
             }
             cbverStages["${COMBINATION_PLATFORM}-${label}"] = {
-                node(COMBINATION_LABEL) {
+                node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                     def CLUSTER = new DynamicCluster(version)
                     try {
                         stage(label) {
@@ -753,7 +756,7 @@ expiry: 4h
             }
         }
         cbverStages["${COMBINATION_PLATFORM}-capella"] = {
-            node(COMBINATION_LABEL) {
+            node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
