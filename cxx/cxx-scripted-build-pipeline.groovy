@@ -117,6 +117,37 @@ def checkoutPipelineRepo() {
 }
 
 
+// Report the executing agent's identity so triage can correlate a stage's
+// output with the physical host that ran it. Especially useful where the
+// node() label can match multiple physical agents (see the labels-vs-
+// identifiers header near TARBALL_LABEL): the resolved NODE_NAME tells
+// you which one Jenkins actually picked, and the *_LABELS values let you
+// see the full label set the host advertised (often a superset of the
+// label we asked for, which sometimes explains "why did *this* host
+// answer?"). HOSTNAME and CONTAINER_TAG are populated by the agent
+// provisioner and distinguish container-on-host situations where
+// NODE_NAME alone is ambiguous.
+def reportExecutingNode() {
+    if (isUnix()) {
+        sh '''
+            echo "HOSTNAME=${HOSTNAME}"
+            echo "NODE_NAME=${NODE_NAME}"
+            echo "CONTAINER_TAG=${CONTAINER_TAG}"
+            echo "JENKINS_SLAVE_LABELS=${JENKINS_SLAVE_LABELS}"
+            echo "NODE_LABELS=${NODE_LABELS}"
+        '''
+    } else {
+        powershell '''
+            Write-Host "HOSTNAME=$env:COMPUTERNAME"
+            Write-Host "NODE_NAME=$env:NODE_NAME"
+            Write-Host "CONTAINER_TAG=$env:CONTAINER_TAG"
+            Write-Host "JENKINS_SLAVE_LABELS=$env:JENKINS_SLAVE_LABELS"
+            Write-Host "NODE_LABELS=$env:NODE_LABELS"
+        '''
+    }
+}
+
+
 // Pin cbdinocluster on the current agent by invoking the cross-platform
 // installer at cxx/scripts/install_cbdinocluster.py. The script reads the
 // pinned version and per-asset SHA-256 map from cxx/scripts/cbdinocluster.json
@@ -191,6 +222,7 @@ stage("prepare and validate") {
         cleanWs()
 
         stage("environment") {
+            reportExecutingNode()
             // DIAGNOSTIC ONLY — `set +e` + `exit 0` deliberately swallows missing-tool
             // errors so the build log shows what *is* present rather than failing at the
             // first absent binary. Do not add load-bearing commands inside this heredoc;
@@ -269,6 +301,7 @@ stage("build") {
                 // generous enough to hide a real hang.
                 timeout(unit: 'MINUTES', time: 45) {
                 stage("prep") {
+                    reportExecutingNode()
                     // Per-node toolchain report: what THIS build node actually has, not just what
                     // prepare-and-validate saw. Best-effort — missing tools never fail the stage.
                     // Goal: when a build breaks on one platform, the build log already records the
@@ -511,6 +544,7 @@ if (!SKIP_TESTS.toBoolean()) {
     node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
+                reportExecutingNode()
                 unstash("${COMBINATION_PLATFORM}_build")
                 withEnv([
                     "CTEST_OUTPUT_ON_FAILURE=1",
@@ -551,6 +585,7 @@ if (!SKIP_TESTS.toBoolean()) {
                     def CLUSTER = new DynamicCluster(version)
                     try {
                         stage(label) {
+                            reportExecutingNode()
                             // 15-min cap on the cluster bring-up: docker version, ensure*,
                             // cbdinocluster init/alloc/buckets-add/cert-fetch/connstr, and the
                             // N1QL primary-index curl. A wedged `cbdinocluster alloc` or hung
@@ -781,6 +816,7 @@ expiry: 4h
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
+                        reportExecutingNode()
                         // 15-min cap on Capella bring-up — covers ensure*, init, the cloud
                         // alloc round-trip (slower than docker; AWS may take minutes), bucket
                         // creation, CA fetch, and the N1QL curl. Same independent-budget
