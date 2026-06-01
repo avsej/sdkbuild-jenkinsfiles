@@ -531,6 +531,12 @@ if (!SKIP_TESTS.toBoolean()) {
                 label = v["label"]
             }
             cbverStages["${COMBINATION_PLATFORM}-${label}"] = {
+                // cbdinocluster is node-local: it stores allocated-cluster state on the agent's
+                // filesystem, and docker-deployed cluster containers live on the agent's docker
+                // daemon (private bridge network, not reachable from other agents). Keep the
+                // bring-up / test / cleanup trio inside this single node() block — splitting it
+                // across nodes leaks the cluster (rm has no record of it) and breaks TCP reach
+                // from the test stage to the cluster.
                 node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                     def CLUSTER = new DynamicCluster(version)
                     try {
@@ -756,6 +762,11 @@ expiry: 4h
             }
         }
         cbverStages["${COMBINATION_PLATFORM}-capella"] = {
+            // Same single-node() constraint as the docker branch above: cbdinocluster's
+            // bookkeeping (which deployer owns this cluster id, what config was used) is
+            // stored on the agent's local filesystem even when the cluster itself is in
+            // the cloud. Allocating on one agent and running `cbdinocluster rm` on another
+            // leaks the cluster — and a leaked Capella cluster bills the org until expiry.
             node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                 def CLUSTER = new DynamicCluster("capella")
                 try {
