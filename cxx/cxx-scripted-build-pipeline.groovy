@@ -329,6 +329,45 @@ def pruneForStash() {
 }
 
 
+// Best-effort docker-side post-mortem, run when cluster bring-up fails or
+// times out. Build #12's failure mode was unobservable from the cbdinocluster
+// log alone: `alloc -v` went silent at "waiting for it to get ready" for
+// ~13 minutes and then the stage timeout killed it — no record of whether
+// the server processes were starting slowly, OOM-looping, or wedged. This
+// dumps, for every couchbase/server container on the agent: docker status,
+// host memory/disk pressure, the last log lines, and HTTP probes of the
+// management ports (8091 plain, 18091 TLS — status 200/401 means the REST
+// endpoint is up; 000 means nothing is listening, i.e. the server never
+// came up). DIAGNOSTIC ONLY: set +e / exit 0, never fails the stage, and
+// must stay cheap — it runs inside a catch while failFast may be tearing
+// the build down around it.
+def collectDockerDiagnostics() {
+    sh '''
+        set +e
+        echo "===== docker diagnostics (cluster bring-up post-mortem) ====="
+        docker ps -a --format "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Names}}" | head -20
+        echo "----- host pressure -----"
+        free -h 2>/dev/null
+        df -h . 2>/dev/null
+        docker stats --no-stream 2>/dev/null | head -10
+        for c in $(docker ps -q 2>/dev/null); do
+            img=$(docker inspect -f "{{.Config.Image}}" "$c" 2>/dev/null)
+            case "$img" in
+                *couchbase*) ;;
+                *) continue ;;
+            esac
+            ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}" "$c" 2>/dev/null | awk "{print \\$1}")
+            echo "----- container $c image=$img ip=$ip -----"
+            echo "8091 (plain): HTTP $(curl -m 5 -s -o /dev/null -w "%{http_code}" "http://$ip:8091/pools" 2>/dev/null)"
+            echo "18091 (TLS):  HTTP $(curl -m 5 -k -s -o /dev/null -w "%{http_code}" "https://$ip:18091/pools" 2>/dev/null)"
+            echo "--- last 25 log lines ---"
+            docker logs --tail 25 "$c" 2>&1 | tail -25
+        done
+        exit 0
+    '''
+}
+
+
 // Pin cbdinocluster on the current agent by invoking the cross-platform
 // installer at cxx/scripts/install_cbdinocluster.py. The script reads the
 // pinned version and per-asset SHA-256 map from cxx/scripts/cbdinocluster.json
@@ -956,13 +995,25 @@ if (!SKIP_TESTS.toBoolean()) {
                         stage(label) {
                             reportExecutingNode()
                             reportPersistence()
-                            // 15-min cap on the cluster bring-up: docker version, ensure*,
+                            // 25-min cap on the cluster bring-up: docker version, ensure*,
                             // cbdinocluster init/alloc/buckets-add/cert-fetch/connstr, and the
                             // N1QL primary-index curl. A wedged `cbdinocluster alloc` or hung
                             // docker daemon must not eat into the 40-min test budget below —
                             // keeping them as independent timeouts makes the failure mode
                             // (bring-up hang vs test hang) immediately legible in the build log.
-                            timeout(unit: 'MINUTES', time: 15) {
+                            // Was 15 min, calibrated before allocs really ran: build #12 spent
+                            // ~2 min pulling the server image on a cold agent and the 3-node
+                            // ready-wait was still in flight when the cap killed it (the alloc
+                            // itself was healthy — containers up at T+95s).
+                            //
+                            // On any bring-up failure (incl. this timeout firing) the catch
+                            // below dumps docker-side state — container status, host memory,
+                            // last server log lines, and 8091/18091 management-port probes —
+                            // because `alloc -v` is silent during the ready-wait and the
+                            // cbdinocluster log alone cannot distinguish slow-boot from
+                            // OOM-loop from wedged.
+                            try {
+                            timeout(unit: 'MINUTES', time: 25) {
                             deleteDir()
                             // Pre-flight disk gate. INTEGRATION_DISK_THRESHOLD_GB covers
                             // 3× CB server Docker images (~1.5 GB each) + cluster runtime
@@ -1013,8 +1064,16 @@ docker:
   fts-memory: 2048
   cbas-memory: 2048
   use-dino-certs: ${useDinoCerts}
-expiry: 4h
+expiry: 2h
 """
+                            // expiry 2h (was 4h): the worst honest lifetime is bring-up cap
+                            // (25 min) + test cap (40 min) + slack. Expiry is the ONLY thing
+                            // that reclaims a cluster whose alloc was interrupted before
+                            // printing its id (build #12 leaked 3 containers exactly this
+                            // way — SIGTERM mid-ready-wait, id never captured, rm skipped),
+                            // so a tight value directly bounds how long a leak squats on
+                            // the agent's RAM.
+
                             // Surface the generated def in the build log: alloc failures
                             // (e.g. build #11's unparseable version aliases) reference the
                             // YAML fields, so triage should not require reconstructing the
@@ -1023,6 +1082,13 @@ expiry: 4h
 
                             // init is idempotent; safe to re-run on any agent picking up this label.
                             sh("cbdinocluster -v init --auto")
+                            // Reap anything past its expiry that earlier builds left behind
+                            // (interrupted allocs can't be rm'd by their own cleanup stage —
+                            // no id). Runs before OUR alloc so the leaked clusters' RAM and
+                            // disk are back in the pool when the new nodes boot. Scoped to
+                            // expired resources only, so concurrent jobs' live clusters on
+                            // shared sdkqe agents are untouched. Best-effort by design.
+                            sh("cbdinocluster cleanup || true")
                             CLUSTER.id_ = sh(script: "cbdinocluster -v alloc --def-file=cluster.yaml", returnStdout: true).trim()
                             // Guard against the alloc returning empty/garbage: every downstream
                             // step interpolates ${CLUSTER.clusterId()} into a shell command, and
@@ -1120,6 +1186,13 @@ expiry: 4h
                                 }
                             }
                             }  // close cluster bring-up timeout
+                            } catch (bringupErr) {
+                                // Post-mortem before the exception propagates (and before
+                                // failFast reuses/tears down the agent). Best-effort — the
+                                // helper never throws.
+                                collectDockerDiagnostics()
+                                throw bringupErr
+                            }
                         }
                         timeout(unit: 'MINUTES', time: 40) {
                             stage("test") {
@@ -1190,6 +1263,12 @@ expiry: 4h
                                 sh("cbdinocluster rm ${CLUSTER.clusterId()}")
                             } else {
                                 echo("skipping cbdinocluster rm: cluster id was never set")
+                                // The id-less case is exactly the one that leaks (build #12:
+                                // alloc SIGTERM'd mid-ready-wait left 3 running containers).
+                                // We can't rm what we can't name, but we can reap whatever
+                                // is already past expiry — ours from a previous round, or
+                                // older builds'. Best-effort: never mask the original error.
+                                sh("cbdinocluster cleanup || true")
                             }
                         }
                     }
@@ -1348,13 +1427,22 @@ expiry: 4h
         }
         }  // if (CAPELLA_READY)
         // failFast aborts other CB-version stages as soon as one fails, freeing their
-        // agents — same rationale as the build matrix above. Outer 120-min cap is the
+        // agents — same rationale as the build matrix above. The outer cap is the
         // budget for the whole integration parallel: a hung `cbdinocluster alloc` or
         // wedged docker daemon must not idle agents for the rest of the working day.
         // Per-stage timeouts inside each branch (cluster bring-up + 40-min test stage)
         // catch finer-grained hangs.
+        //
+        // Scaled per version branch rather than flat 120: the sdkqe pool has only
+        // ~2 executors, so the branches largely SERIALIZE — worst healthy case is
+        // ceil(N/2) waves of (25-min bring-up + 40-min test + overhead). A flat cap
+        // sized for parallel execution kills healthy in-flight allocs, which is how
+        // build #12 ended (queue wait ate the budget, abort landed mid-ready-wait).
+        // 70 min/branch is the single-branch worst case; queueing halves effective
+        // concurrency, so N * 70 / 2 + slack ≈ N * 40 + 60. failFast still ends
+        // genuinely broken runs early.
         cbverStages.failFast = true
-        timeout(unit: 'MINUTES', time: 120) {
+        timeout(unit: 'MINUTES', time: 40 * CB_VERSIONS.size() + 60) {
             parallel(cbverStages)
         }
     }
