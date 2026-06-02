@@ -86,21 +86,24 @@ def COMBINATION_PLATFORM = "rocky9-amd64"
 def TARBALL_LABEL = "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 
 // Per-platform disk threshold (GB free on workspace drive) required
-// before a build proceeds. Tuning knob lives here so per-platform
-// changes don't require helper edits. msvc-2022 needs the largest
-// budget — Debug PDBs for gRPC + protobuf + boringssl total ~25 GB
-// per the runbook. 15 GB is conservative for Linux/macOS gRPC builds
-// (~5-8 GB observed for _deps/ + build output, doubled for headroom).
+// before a build proceeds. Keyed by the user-facing platform IDs (the
+// PLATFORM_EXECUTOR keys) — the build matrix iterates those, so the
+// gate looks up DISK_THRESHOLD_GB[platform] directly. Tuning knob
+// lives here so per-platform changes don't require helper edits.
+// win2022-amd64 (msvc-2022) needs the largest budget — Debug PDBs for
+// gRPC + protobuf + boringssl total ~25 GB per the runbook. 15 GB is
+// conservative for Linux/macOS gRPC builds (~5-8 GB observed for
+// _deps/ + build output, doubled for headroom).
 // See cxx-pipeline-disk-defense-design.md §B.
 def DISK_THRESHOLD_GB = [
-    "rockylinux9":       15,
-    "macos":             15,
-    "m1":                15,
-    "alpine3.21":        15,
-    "msvc-2022":         40,
-    "qe-rhel9-arm64":    15,
-    "qe-ubuntu24-amd64": 15,
-    "qe-ubuntu24-arm64": 15,
+    "alpine3.21-amd64": 15,
+    "rocky9-amd64":     15,
+    "ubuntu24-amd64":   15,
+    "rhel9-arm64":      15,
+    "ubuntu24-arm64":   15,
+    "macos14-amd64":    15,
+    "macos15-arm64":    15,
+    "win2022-amd64":    40,
 ]
 // Integration test nodes need headroom for cbdinocluster Docker image
 // pulls (3 nodes × ~1.5 GB CB server image + runtime data + build
@@ -454,7 +457,7 @@ stage("build") {
                     reportExecutingNode()
 
                     // Pre-flight disk gate. Per-platform threshold from DISK_THRESHOLD_GB
-                    // (msvc-2022: 40 GB for gRPC+protobuf+boringssl PDB output; others: 15 GB).
+                    // (win2022-amd64: 40 GB for gRPC+protobuf+boringssl PDB output; others: 15 GB).
                     // Fails in ~5 s if the agent is full instead of after ~20 min of compile
                     // work — see cxx-pipeline-disk-defense-design.md §1.
                     ensureDiskSpace(DISK_THRESHOLD_GB[platform])
