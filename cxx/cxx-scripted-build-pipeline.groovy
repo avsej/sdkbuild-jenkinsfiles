@@ -350,14 +350,15 @@ def collectDockerDiagnostics() {
         free -h 2>/dev/null
         df -h . 2>/dev/null
         docker stats --no-stream 2>/dev/null | head -10
-        for c in $(docker ps -q 2>/dev/null); do
-            img=$(docker inspect -f "{{.Config.Image}}" "$c" 2>/dev/null)
-            case "$img" in
-                *couchbase*) ;;
-                *) continue ;;
-            esac
+        # Select by container NAME, not image: cbdinocluster deploys by image
+        # ID (deployOpts ImagePath sha256:...), so Config.Image is a bare sha
+        # that never matches *couchbase* — verified live against a local
+        # cbdinocluster v0.0.114 alloc. The controller names every node
+        # container cbdynnode-<uuid>.
+        for c in $(docker ps -q --filter "name=cbdynnode" 2>/dev/null); do
             ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}" "$c" 2>/dev/null | awk "{print \\$1}")
-            echo "----- container $c image=$img ip=$ip -----"
+            name=$(docker inspect -f "{{.Name}}" "$c" 2>/dev/null)
+            echo "----- container $name ($c) ip=$ip -----"
             echo "8091 (plain): HTTP $(curl -m 5 -s -o /dev/null -w "%{http_code}" "http://$ip:8091/pools" 2>/dev/null)"
             echo "18091 (TLS):  HTTP $(curl -m 5 -k -s -o /dev/null -w "%{http_code}" "https://$ip:18091/pools" 2>/dev/null)"
             echo "--- last 25 log lines ---"
