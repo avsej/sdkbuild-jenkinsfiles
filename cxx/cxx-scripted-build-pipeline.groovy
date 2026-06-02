@@ -555,12 +555,18 @@ def computeJobs() {
 stage("prepare and validate") {
     node(TARBALL_LABEL) {
         script {
+            // .toBoolean() is load-bearing: these are Jenkins STRING params, and
+            // an unchecked checkbox arrives as the string "false" — which Groovy
+            // truthiness treats as TRUE (non-empty string). Without the
+            // conversion every run gets named "-tls-cert" regardless of the
+            // form values (builds #8–#12 were all mislabeled this way while
+            // actually running plain).
             buildName([
                 BUILD_NUMBER,
                 PR_ID == "" ? null : "pr${PR_ID}",
                 // STORAGE_BACKEND,
-                USE_TLS ? "tls" : null,
-                USE_CERT_AUTH ? "cert" : null,
+                USE_TLS.toBoolean() ? "tls" : null,
+                USE_CERT_AUTH.toBoolean() ? "cert" : null,
             ].findAll { it != null }.join("-"))
         }
         cleanWs()
