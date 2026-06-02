@@ -51,19 +51,22 @@ if (!PLATFORM || PLATFORM == "ALL") {
 } else {
     error("Unknown PLATFORM '${PLATFORM}'. Choose one of: ALL, ${PLATFORM_EXECUTOR.keySet().join(', ')}.")
 }
+// cbdinocluster needs concrete server versions: its versionident parses
+// "X.Y.Z" or "X.Y.Z-<numeric build>", so the cbdyncluster-era channel
+// aliases ("7.1-release", "7.6-stable") die in strconv.ParseInt — every
+// alloc in build #11 failed with `failed to parse build number: parsing
+// "release"`. tag: newest EE docker tag of the train; ceTag: newest
+// Community tag of the same train (CE trails EE — e.g. 7.6 EE reaches
+// 7.6.11 while CE stops at 7.6.2; checked against hub.docker.com
+// couchbase/server tags, 2026-06-02). label keeps the old channel name
+// for stage/branch display so run-to-run comparisons stay legible.
 def CB_VERSIONS = [
-    "71release": [tag: "7.1-release"],
-    "72stable": [tag: "7.2-stable"],
-    "76stable": [tag: "7.6-stable"],
-    "80stable": [tag: "8.0-stable"]
+    "70release": [tag: "7.0.5",  ceTag: "7.0.2",  label: "7.0-release"],
+    "71release": [tag: "7.1.6",  ceTag: "7.1.1",  label: "7.1-release"],
+    "72stable":  [tag: "7.2.9",  ceTag: "7.2.4",  label: "7.2-stable"],
+    "76stable":  [tag: "7.6.11", ceTag: "7.6.2",  label: "7.6-stable"],
+    "80stable":  [tag: "8.0.1",  ceTag: "8.0.1",  label: "8.0-stable"]
 ]
-
-// no 7.0.4 release for community
-if (USE_CE.toBoolean()) {
-    CB_VERSIONS["70release"] = [tag: "7.0.2", label: "7.0-release"]
-} else {
-    CB_VERSIONS["70release"] = [tag: "7.0-release"]
-}
 def COMBINATION_PLATFORM = "rocky9-amd64"
 // Every node(...) expression in this file is a Jenkins LABEL, not a node
 // identifier — and a label can match multiple physical agents. Jenkins
@@ -831,7 +834,9 @@ if (!SKIP_TESTS.toBoolean()) {
         def cbverStages = [:]
         CB_VERSIONS.each { cb_version ->
             def v = cb_version.value
-            def version = v["tag"]
+            // CE images stop earlier than EE in every train, so the Community
+            // run pins its own tag (the yaml below prefixes "community-").
+            def version = USE_CE.toBoolean() ? v["ceTag"] : v["tag"]
             def label = version
             if (v["label"] != null) {
                 label = v["label"]
@@ -908,6 +913,11 @@ docker:
   use-dino-certs: ${useDinoCerts}
 expiry: 4h
 """
+                            // Surface the generated def in the build log: alloc failures
+                            // (e.g. build #11's unparseable version aliases) reference the
+                            // YAML fields, so triage should not require reconstructing the
+                            // file from groovy interpolation by hand.
+                            sh("cat cluster.yaml")
 
                             // init is idempotent; safe to re-run on any agent picking up this label.
                             sh("cbdinocluster -v init --auto")
@@ -1084,6 +1094,13 @@ expiry: 4h
                 }
             }
         }
+        // TODO(TD-09): flip to true once the Capella credentials are provisioned
+        // on the sdkqe agents (see the withCredentials TODO inside the stage).
+        // Until then `init --auto` cannot configure the cloud deployer (build #11:
+        // IMDS timeouts, "Capella: Enabled: false"), the branch fails every run,
+        // and cbverStages.failFast lets that abort the healthy docker branches.
+        def CAPELLA_READY = false
+        if (CAPELLA_READY) {
         cbverStages["${COMBINATION_PLATFORM}-capella"] = {
             // Same single-node() constraint as the docker branch above: cbdinocluster's
             // bookkeeping (which deployer owns this cluster id, what config was used) is
@@ -1137,6 +1154,9 @@ nodes:
     services: [kv, index, n1ql, eventing, fts, cbas]
 expiry: 4h
 """
+                        // Same rationale as the docker stage: the def must be readable
+                        // straight from the build log.
+                        sh("cat cluster.yaml")
                         CLUSTER.id_ = sh(script: "cbdinocluster -v alloc --deployer=cloud --def-file=cluster.yaml", returnStdout: true).trim()
                         // Guard before any downstream interpolation — and especially before the
                         // cleanup `cbdinocluster rm` runs against a billed cloud cluster.
@@ -1224,6 +1244,7 @@ expiry: 4h
                 }
             }
         }
+        }  // if (CAPELLA_READY)
         // failFast aborts other CB-version stages as soon as one fails, freeing their
         // agents — same rationale as the build matrix above. Outer 120-min cap is the
         // budget for the whole integration parallel: a hung `cbdinocluster alloc` or
