@@ -307,11 +307,24 @@ def ensureCmake() {
 // including node name, observed free GB, and threshold. Per-platform
 // thresholds live in DISK_THRESHOLD_GB / INTEGRATION_DISK_THRESHOLD_GB
 // at the top of the file. See cxx-pipeline-disk-defense-design.md §A.
+//
+// POSIX sh only — Jenkins runs sh steps under /bin/sh, which is dash
+// on the qe-ubuntu24-* EC2 agents (build #9 died on `set -o pipefail`:
+// "Illegal option") and busybox ash on alpine3.21. No pipefail; the
+// numeric guard on free_kb catches a failed/garbled df more strictly
+// than pipefail would (df -P pins the POSIX output format so column 4
+// is dependable across distros).
 def ensureDiskSpace(int minGB) {
     if (isUnix()) {
         sh """
-            set -euo pipefail
-            free_kb=\$(df -k . | tail -1 | awk '{print \$4}')
+            set -eu
+            free_kb=\$(df -kP . | awk 'NR==2 {print \$4}')
+            case "\$free_kb" in
+                ''|*[!0-9]*)
+                    echo "ERROR: could not determine free disk space on \${NODE_NAME:-?} (df output unparseable: '\$free_kb')" >&2
+                    exit 1
+                    ;;
+            esac
             free_gb=\$((free_kb / 1024 / 1024))
             echo "ensureDiskSpace: \$free_gb GB free on workspace drive (node=\${NODE_NAME:-?}, threshold=${minGB} GB)"
             if [ "\$free_gb" -lt ${minGB} ]; then
@@ -859,8 +872,16 @@ expiry: 4h
                                 // and writes the requested files. get-client-cert mints a fresh
                                 // keypair on every call, so a single piped invocation (one stdin
                                 // read → two files) is the only way to get a matching pair.
+                                //
+                                // pipefail is enabled only where /bin/sh supports it (bash; dash
+                                // on qe-ubuntu24-* rejects it — build #9). Where it's off, a
+                                // failed cbdinocluster still surfaces: extract_cert.py exits
+                                // non-zero on empty/non-JSON stdin. Don't capture the JSON in a
+                                // shell variable instead — Jenkins runs sh steps with -x, which
+                                // would trace the client key material into the build log.
                                 sh """
-                                    set -euo pipefail
+                                    set -eu
+                                    if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
                                     cbdinocluster certificates get-dino-ca --json \\
                                         | python3 pipeline-scripts/cxx/scripts/extract_cert.py \\
                                             --cert-out ${CLUSTER.certsDir}/ca.pem
@@ -871,7 +892,8 @@ expiry: 4h
                                 """
                             } else if (CLUSTER.useTLS) {
                                 sh """
-                                    set -euo pipefail
+                                    set -eu
+                                    if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
                                     cbdinocluster certificates get-ca --json ${CLUSTER.clusterId()} \\
                                         | python3 pipeline-scripts/cxx/scripts/extract_cert.py \\
                                             --cert-out ${CLUSTER.certsDir}/ca.pem
@@ -1065,7 +1087,8 @@ expiry: 4h
                         // deployer owns the cluster (cloud, for Capella).
                         CLUSTER.certsDir = WORKSPACE
                         sh """
-                            set -euo pipefail
+                            set -eu
+                            if (set -o pipefail) 2>/dev/null; then set -o pipefail; fi
                             cbdinocluster certificates get-ca --json ${CLUSTER.clusterId()} \\
                                 | python3 pipeline-scripts/cxx/scripts/extract_cert.py \\
                                     --cert-out ${CLUSTER.certsDir}/ca.pem
