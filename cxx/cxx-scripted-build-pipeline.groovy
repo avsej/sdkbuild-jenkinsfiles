@@ -250,12 +250,13 @@ def ensurePython() {
 
 
 // Hard-gate the cmake version that will actually invoke configure on
-// this node. The cxx-client itself requires cmake >= 3.19, but vendored
-// deps tighten the floor: llhttp's CMakeLists requires 3.22 and
-// CMakeConfigureLog.yaml (our configure-failure triage artifact) needs
-// 3.26. Failing fast at < 3.22 means a stale local install — e.g.
-// /usr/local/bin/cmake at 3.21.4 on qe-ubuntu24-arm64 — surfaces here
-// with a clean message naming the binary, rather than dying mid-
+// this node. The floor is the cxx-client's own cmake_minimum_required
+// (3.19); since Packaging.cmake rewrites llhttp's inflated 3.25 floor
+// down to 3.19 too, nothing in the tarball demands more (all other
+// vendored deps declare <= 3.16). Note cmake < 3.26 still works but
+// produces no CMakeConfigureLog.yaml (our configure-failure triage
+// artifact). Failing fast at < 3.19 means a broken install surfaces
+// here with a clean message naming the binary, rather than dying mid-
 // FetchContent after grpc/curl/opentelemetry have all already downloaded.
 //
 // Called from prepare-and-validate (fail-fast for the whole pipeline,
@@ -275,8 +276,8 @@ def ensureCmake() {
             major=$(echo "$version" | cut -d. -f1)
             minor=$(echo "$version" | cut -d. -f2)
             combined=$((major * 1000 + minor))
-            if [ "$combined" -lt 3022 ]; then
-                echo "ERROR: cmake $version at $(command -v cmake) is too old; need >= 3.22 (llhttp's cmake_minimum_required)." >&2
+            if [ "$combined" -lt 3019 ]; then
+                echo "ERROR: cmake $version at $(command -v cmake) is too old; need >= 3.19 (cxx-client's cmake_minimum_required)." >&2
                 echo "       PATH=$PATH" >&2
                 exit 1
             fi
@@ -289,8 +290,8 @@ def ensureCmake() {
             if (-not $cmd) { throw "cmake not found on PATH. PATH=$env:PATH" }
             $versionLine = (& cmake --version)[0]
             $version = [version]($versionLine -replace 'cmake version ','')
-            if ($version -lt [version]"3.22") {
-                throw "cmake $version at $($cmd.Source) is too old; need >= 3.22 (llhttp's cmake_minimum_required). PATH=$env:PATH"
+            if ($version -lt [version]"3.19") {
+                throw "cmake $version at $($cmd.Source) is too old; need >= 3.19 (cxx-client's cmake_minimum_required). PATH=$env:PATH"
             }
             Write-Host "cmake $version OK at $($cmd.Source)"
         '''
@@ -402,7 +403,7 @@ stage("prepare and validate") {
                 exit 0
             '''
             // Hard-gates: pipeline assumes python3 from this point on, and
-            // cmake >= 3.22 from the cmake-configure step at the bottom of
+            // cmake >= 3.19 from the cmake-configure step at the bottom of
             // this stage. Failing here is cheaper than failing 30 minutes
             // later in cert handling or mid-FetchContent.
             ensurePython()
@@ -599,11 +600,14 @@ stage("build") {
                     } else {
                         // Linux platforms — rockylinux9, alpine3.21, qe-rhel9-arm64, qe-ubuntu24-* —
                         // ship cmake ≥ 3.26 via dnf/apt/apk (well above cxx-client's
-                        // cmake_minimum_required(3.19) AND llhttp's cmake_minimum_required(3.22)).
-                        // Some agents have a stale /usr/local/bin/cmake installed manually that
-                        // shadows the distro package; verified on qe-ubuntu24-arm64 where the
-                        // local install is 3.21.4 while apt's cmake is 3.28+. Prepend /usr/bin so
-                        // the distro cmake wins without needing sudo to remove the manual install.
+                        // cmake_minimum_required(3.19), which is also the tarball's floor after
+                        // Packaging.cmake rewrites llhttp's inflated 3.25). Some agents have a
+                        // stale /usr/local/bin/cmake installed manually that shadows the distro
+                        // package; prepend /usr/bin so the distro cmake wins without needing
+                        // sudo to remove the manual install. NOTE: this is best-effort only —
+                        // build #8 showed qe-ubuntu24-arm64 re-imaged WITHOUT the apt cmake, so
+                        // /usr/bin/cmake didn't exist and the stale 3.21.4 was still resolved;
+                        // ensureCmake() below is the actual gate.
                         path = "/usr/bin:" + path
                     }
                     echo("PATH=$path")
