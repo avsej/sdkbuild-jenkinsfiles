@@ -189,6 +189,63 @@ def reportExecutingNode() {
 }
 
 
+// DIAGNOSTIC ONLY — answers "is this runner persistent, and would ccache
+// help across builds?" (design: docs/superpowers/specs/
+// 2026-06-02-runner-persistence-ccache-probe-design.md). Three probes:
+//
+//   1. Uptime, two ways. /proc/uptime is the HOST's uptime even inside a
+//      container; mtime of /proc/1 is PID 1's start, i.e. the container
+//      start (≈ boot time on a bare host). pid1_age << host_uptime means
+//      "container on a long-lived host" — the case where a volume-mounted
+//      CCACHE_DIR would pay off.
+//   2. Build-visit markers: one empty file per build under
+//      ${XDG_CACHE_HOME:-~/.cache}/cb-sdk-build-markers/$JOB_NAME. The
+//      marker dir deliberately shares a survival domain with ccache's
+//      default cache dir (~/.ccache or ~/.cache/ccache): if markers
+//      accumulate across builds, a compiler cache would have survived too.
+//      Count = builds this runner has executed; names = which and when.
+//   3. Existing ccache version, stats (pre-build hit-rate history on
+//      persistent runners), cache dir and its on-disk size.
+//
+// ccache is already wired into the build (cmake/Cache.cmake auto-detects
+// it; bin/build-tests defaults CB_CACHE_OPTION=ccache) — this probe is
+// measurement only, deciding WHERE the cache should live comes after a few
+// builds of data. POSIX sh (dash/ash-safe); `set +e` + `exit 0` like the
+// toolchain dump — missing tools (ccache, /proc on macOS) print nothing,
+// never fail. sh-only by design: win2022-amd64 compiles with MSVC, no
+// ccache, so a powershell variant has nothing to measure yet.
+def reportPersistence() {
+    if (isUnix()) {
+        sh '''
+            set +e
+            echo "===== Runner persistence / ccache ====="
+            uptime
+            [ -f /proc/uptime ] && awk '{printf "host_uptime_seconds: %d\\n", $1}' /proc/uptime
+            if [ -d /proc/1 ]; then
+                container_start=$(stat -c %Y /proc/1 2>/dev/null)
+                if [ -n "$container_start" ]; then
+                    now=$(date +%s)
+                    echo "pid1_age_seconds: $((now - container_start)) (container/runner start)"
+                fi
+            fi
+
+            markers="${XDG_CACHE_HOME:-$HOME/.cache}/cb-sdk-build-markers/${JOB_NAME:-unknown-job}"
+            mkdir -p "$markers"
+            touch "$markers/${BUILD_NUMBER:-0}.$(date +%s)"
+            echo "builds previously seen on this runner: $(ls "$markers" | wc -l) (incl. this one)"
+            ls "$markers" | sort | tail -5
+
+            ccache --version 2>/dev/null | head -1
+            ccache -s 2>/dev/null
+            cache_dir=$(ccache --get-config cache_dir 2>/dev/null || ccache -k cache_dir 2>/dev/null)
+            [ -n "$cache_dir" ] && du -sh "$cache_dir" 2>/dev/null
+            exit 0
+        '''
+    }
+    // No powershell branch: see header comment.
+}
+
+
 // Pin cbdinocluster on the current agent by invoking the cross-platform
 // installer at cxx/scripts/install_cbdinocluster.py. The script reads the
 // pinned version and per-asset SHA-256 map from cxx/scripts/cbdinocluster.json
@@ -415,6 +472,7 @@ stage("prepare and validate") {
                 docker --version    2>/dev/null
                 exit 0
             '''
+            reportPersistence()
             // Hard-gates: pipeline assumes python3 from this point on, and
             // cmake >= 3.19 from the cmake-configure step at the bottom of
             // this stage. Failing here is cheaper than failing 30 minutes
@@ -475,6 +533,10 @@ stage("build matrix") {
                 timeout(unit: 'MINUTES', time: 45) {
                 stage("prep") {
                     reportExecutingNode()
+                    // Before the disk gate on purpose: if the gate trips, the probe's
+                    // ccache-size / marker output is exactly the context that explains
+                    // *why* the agent is full.
+                    reportPersistence()
 
                     // Pre-flight disk gate. Per-platform threshold from DISK_THRESHOLD_GB
                     // (win2022-amd64: 40 GB for gRPC+protobuf+boringssl PDB output; others: 15 GB).
@@ -786,6 +848,7 @@ if (!SKIP_TESTS.toBoolean()) {
                     try {
                         stage(label) {
                             reportExecutingNode()
+                            reportPersistence()
                             // 15-min cap on the cluster bring-up: docker version, ensure*,
                             // cbdinocluster init/alloc/buckets-add/cert-fetch/connstr, and the
                             // N1QL primary-index curl. A wedged `cbdinocluster alloc` or hung
@@ -1032,6 +1095,7 @@ expiry: 4h
                 try {
                     stage("capella") {
                         reportExecutingNode()
+                        reportPersistence()
                         // 15-min cap on Capella bring-up — covers ensure*, init, the cloud
                         // alloc round-trip (slower than docker; AWS may take minutes), bucket
                         // creation, CA fetch, and the N1QL curl. Same independent-budget
