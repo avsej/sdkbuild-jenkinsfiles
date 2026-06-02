@@ -417,10 +417,7 @@ stage("build") {
                         // macOS uses Homebrew's cmake. Fail loud if it's not installed — agents
                         // should be provisioned ahead of the build with `brew install cmake`, and
                         // a missing dep ought to abort here rather than be hidden by an
-                        // opportunistic install. All Linux platforms — rockylinux9, alpine3.21,
-                        // qe-rhel9-arm64, qe-ubuntu24-* — ship cmake ≥ 3.26 via their distro
-                        // package managers (well above cxx-client's cmake_minimum_required(3.19)),
-                        // so they fall through with no install at all.
+                        // opportunistic install.
                         sh '''
                             if ! brew list --versions cmake >/dev/null 2>&1; then
                                 echo "ERROR: cmake is not installed via Homebrew on this agent." >&2
@@ -432,6 +429,15 @@ stage("build") {
                         // Apple Silicon: /opt/homebrew/bin; Intel macOS: /usr/local/bin.
                         def brewBin = (platform == "macos15-arm64") ? "/opt/homebrew/bin" : "/usr/local/bin"
                         path = "${brewBin}:" + path
+                    } else {
+                        // Linux platforms — rockylinux9, alpine3.21, qe-rhel9-arm64, qe-ubuntu24-* —
+                        // ship cmake ≥ 3.26 via dnf/apt/apk (well above cxx-client's
+                        // cmake_minimum_required(3.19) AND llhttp's cmake_minimum_required(3.22)).
+                        // Some agents have a stale /usr/local/bin/cmake installed manually that
+                        // shadows the distro package; verified on qe-ubuntu24-arm64 where the
+                        // local install is 3.21.4 while apt's cmake is 3.28+. Prepend /usr/bin so
+                        // the distro cmake wins without needing sudo to remove the manual install.
+                        path = "/usr/bin:" + path
                     }
                     echo("PATH=$path")
                     envs.push("PATH=$path")
