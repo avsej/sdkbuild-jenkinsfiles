@@ -455,7 +455,13 @@ stage("prepare and validate") {
 }
 
 
-stage("build") {
+// Named "build matrix" (not "build") so it can't collide with the
+// per-platform "build" stage nested inside each parallel lane below —
+// a stage sharing a name with its own descendant confuses Blue Ocean
+// and the Stage View plugin (both key visuals by stage name). The
+// prep / build / unit-tests names repeating across *sibling* lanes is
+// fine: lanes are namespaced by their branch (platform) name.
+stage("build matrix") {
     def builds = [:]
     for (p in PLATFORMS) {
         def platform = p
