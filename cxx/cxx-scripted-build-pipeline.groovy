@@ -242,6 +242,17 @@ def reportPersistence() {
             ccache -s 2>/dev/null
             cache_dir=$(ccache --get-config cache_dir 2>/dev/null || ccache -k cache_dir 2>/dev/null)
             [ -n "$cache_dir" ] && du -sh "$cache_dir" 2>/dev/null
+
+            # Hit-rate hypothesis probe: ccache hashes compile paths absolutely
+            # by default, so a build landing in a Jenkins @N concurrent
+            # workspace (.../TEST-job@2/...) misses 100% against objects cached
+            # from the @-less path. Record the workspace path this build got
+            # and the config knobs that govern it (base_dir, hash_dir,
+            # max_size) — if builds alternate between @-suffixed paths while
+            # hits stay at 0%, that's the confirmation, and CCACHE_BASEDIR is
+            # the fix.
+            echo "workspace path: $(pwd) (WORKSPACE=${WORKSPACE:-unset})"
+            ccache -p 2>/dev/null | grep -E "base_dir|hash_dir|max_size|cache_dir"
             exit 0
         '''
     }
@@ -633,6 +644,18 @@ stage("build matrix") {
                     // jobs chosen to the build log. See cxx-pipeline-disk-defense-design.md
                     // §2 + §C.
                     def envs = ["CB_NUMBER_OF_JOBS=${computeJobs()}"]
+                    // Raise ccache's trim ceiling from the 5 GB default: one cold
+                    // Debug build is ~1 GB (build #12 probe: 3015 objects / 938M),
+                    // so the default holds only ~4-5 builds before LRU eviction
+                    // starts eating exactly the warm objects we want across
+                    // builds. Runners are persistent (pid1_age 15+ days, cache
+                    // survived the #11→#12 boundary) and the prep disk gate
+                    // guarantees 15 GB free before we start, so 20 GB is safe.
+                    // Env var rather than `ccache --set-config`: no agent state
+                    // mutated, the value is versioned here, and it only governs
+                    // compiles in this stage. Harmless on win2022 (no ccache) —
+                    // cmake/Cache.cmake just never finds the binary.
+                    envs.push("CCACHE_MAXSIZE=20G")
                     if (platform == "macos14-amd64") {
                         envs.push("OPENSSL_ROOT_DIR=/usr/local/opt/openssl")
                     } else if (platform == "macos15-arm64") {
