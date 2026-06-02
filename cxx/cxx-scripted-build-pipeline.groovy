@@ -208,6 +208,55 @@ def ensurePython() {
 }
 
 
+// Hard-gate the cmake version that will actually invoke configure on
+// this node. The cxx-client itself requires cmake >= 3.19, but vendored
+// deps tighten the floor: llhttp's CMakeLists requires 3.22 and
+// CMakeConfigureLog.yaml (our configure-failure triage artifact) needs
+// 3.26. Failing fast at < 3.22 means a stale local install — e.g.
+// /usr/local/bin/cmake at 3.21.4 on qe-ubuntu24-arm64 — surfaces here
+// with a clean message naming the binary, rather than dying mid-
+// FetchContent after grpc/curl/opentelemetry have all already downloaded.
+//
+// Called from prepare-and-validate (fail-fast for the whole pipeline,
+// after ensurePython) and from each build-matrix node (inside withEnv,
+// after the per-platform PATH manipulation, so the gate sees the cmake
+// we'll actually invoke and not the agent's pre-prepend default).
+def ensureCmake() {
+    if (isUnix()) {
+        sh '''
+            set -e
+            if ! command -v cmake >/dev/null 2>&1; then
+                echo "ERROR: cmake not found on PATH" >&2
+                echo "       PATH=$PATH" >&2
+                exit 1
+            fi
+            version=$(cmake --version | head -1 | awk '{print $3}')
+            major=$(echo "$version" | cut -d. -f1)
+            minor=$(echo "$version" | cut -d. -f2)
+            combined=$((major * 1000 + minor))
+            if [ "$combined" -lt 3022 ]; then
+                echo "ERROR: cmake $version at $(command -v cmake) is too old; need >= 3.22 (llhttp's cmake_minimum_required)." >&2
+                echo "       PATH=$PATH" >&2
+                exit 1
+            fi
+            echo "cmake $version OK at $(command -v cmake)"
+        '''
+    } else {
+        powershell '''
+            $ErrorActionPreference = 'Stop'
+            $cmd = Get-Command cmake -ErrorAction SilentlyContinue
+            if (-not $cmd) { throw "cmake not found on PATH. PATH=$env:PATH" }
+            $versionLine = (& cmake --version)[0]
+            $version = [version]($versionLine -replace 'cmake version ','')
+            if ($version -lt [version]"3.22") {
+                throw "cmake $version at $($cmd.Source) is too old; need >= 3.22 (llhttp's cmake_minimum_required). PATH=$env:PATH"
+            }
+            Write-Host "cmake $version OK at $($cmd.Source)"
+        '''
+    }
+}
+
+
 stage("prepare and validate") {
     node(TARBALL_LABEL) {
         script {
@@ -251,9 +300,12 @@ stage("prepare and validate") {
                 docker --version    2>/dev/null
                 exit 0
             '''
-            // Hard-gate: pipeline assumes python3 from this point on.
-            // Better to fail here than mid-cert-handling 30 minutes later.
+            // Hard-gates: pipeline assumes python3 from this point on, and
+            // cmake >= 3.22 from the cmake-configure step at the bottom of
+            // this stage. Failing here is cheaper than failing 30 minutes
+            // later in cert handling or mid-FetchContent.
             ensurePython()
+            ensureCmake()
         }
 
         checkout()
@@ -442,6 +494,10 @@ stage("build") {
                     echo("PATH=$path")
                     envs.push("PATH=$path")
                     withEnv(envs) {
+                        // Inside withEnv so the gate sees the per-platform-adjusted PATH
+                        // (winget-installed cmake on Windows, brew on macOS, /usr/bin on
+                        // Linux), not the agent's pre-prepend default.
+                        ensureCmake()
                         try {
                             dir("ws_${platform}/couchbase-cxx-client") {
                                 if (platform == "win2022-amd64") {
