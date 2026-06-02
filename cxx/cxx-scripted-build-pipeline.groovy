@@ -260,6 +260,75 @@ def reportPersistence() {
 }
 
 
+// Delete build intermediates the stash consumers can never need, keeping
+// everything ctest requires at runtime. Rehearsed against a real build of
+// the build-11 tarball: 7741 MB -> 2584 MB (-67%) with identical ctest
+// enumeration (176 integration / 438 total), clean ldd, and 150/150 unit
+// tests passing on the pruned tree. See
+// docs/superpowers/specs/2026-06-02-stash-prune-design.md.
+//
+// What goes: CMakeFiles/ object trees (~3.1 GB), *.a archives (~1.3 GB —
+// already linked into the binaries), _deps contents (~0.6 GB). What stays
+// — all verified load-bearing: test/tool/example executables (ctest's
+// integration label includes the example binaries!), the shared
+// libcouchbase_cxx_client.so the tests link against, and the
+// CTestTestfile.cmake chain INCLUDING inside _deps — the root testfile
+// has subdirs("_deps/boringssl-build") etc., so ctest traversal breaks
+// if those go.
+//
+// Loud on failure (set -eu / Stop) by design: these are mechanical
+// deletions, and if they fail the workspace deserves a look rather than
+// a silent fall-back to the 8-minute full-fat stash.
+//
+// Called from the build-matrix node after a successful build, as the
+// last act before stash() — mutating the workspace is safe there. Runs
+// on every platform (frees agent disk) even though only
+// COMBINATION_PLATFORM stashes today.
+def pruneForStash() {
+    if (isUnix()) {
+        // POSIX sh + portable find only (dash/ash/BSD): -prune/-exec
+        // instead of GNU -delete/-empty. rmdir bottom-up removes the
+        // emptied _deps dirs and leaves the ones still holding a
+        // CTestTestfile.cmake (its non-zero exit is expected, hence
+        // the || true).
+        sh '''
+            set -eu
+            before=$(du -sm . | cut -f1)
+            find cmake-build-tests -type d -name CMakeFiles -prune -exec rm -rf {} +
+            find cmake-build-tests -type f -name "*.a" -exec rm -f {} +
+            if [ -d cmake-build-tests/_deps ]; then
+                find cmake-build-tests/_deps -type f ! -name "CTestTestfile.cmake" -exec rm -f {} +
+                find cmake-build-tests/_deps -depth -type d -exec rmdir {} + 2>/dev/null || true
+            fi
+            after=$(du -sm . | cut -f1)
+            echo "pruneForStash: ${before} MB -> ${after} MB"
+        '''
+    } else {
+        // msvc-2022 builds in build/ (not cmake-build-tests/); objects
+        // are *.obj, archives *.lib. SilentlyContinue on the CMakeFiles
+        // pass: the recursive listing is materialized before deletion
+        // starts, so nested CMakeFiles dirs may already be gone with
+        // their parent.
+        powershell '''
+            $ErrorActionPreference = 'Stop'
+            $before = [int]((Get-ChildItem -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+            Get-ChildItem build -Recurse -Directory -Filter CMakeFiles |
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+            Get-ChildItem build -Recurse -File | Where-Object { $_.Extension -in ".obj", ".lib" } |
+                Remove-Item -Force
+            if (Test-Path build/_deps) {
+                Get-ChildItem build/_deps -Recurse -File | Where-Object { $_.Name -ne "CTestTestfile.cmake" } |
+                    Remove-Item -Force
+                Get-ChildItem build/_deps -Recurse -Directory | Sort-Object FullName -Descending |
+                    Where-Object { -not (Get-ChildItem $_.FullName -Force) } | Remove-Item -Force
+            }
+            $after = [int]((Get-ChildItem -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)
+            Write-Host "pruneForStash: $before MB -> $after MB"
+        '''
+    }
+}
+
+
 // Pin cbdinocluster on the current agent by invoking the cross-platform
 // installer at cxx/scripts/install_cbdinocluster.py. The script reads the
 // pinned version and per-asset SHA-256 map from cxx/scripts/cbdinocluster.json
@@ -759,10 +828,20 @@ stage("build matrix") {
                             throw buildErr
                         }
                     }
+                    // Drop build intermediates on every platform (frees agent disk now,
+                    // and pre-slims the stashes for the planned all-platform integration
+                    // matrix). Only reached on build success — the catch above rethrows,
+                    // and the CMakeConfigureLog.yaml it archives lives in CMakeFiles/,
+                    // which only gets pruned here on the success path.
+                    dir("ws_${platform}/couchbase-cxx-client") {
+                        pruneForStash()
+                    }
                     if (platform == COMBINATION_PLATFORM) {
                         // The workspace was hydrated from a clean tarball (see "source tarball"
                         // sub-stage in prepare-and-validate), so default excludes are safe — no
                         // .git, no IDE metadata, no stray dotfiles to strip out.
+                        // Payload is pruned above: ~2.5 GB of load-bearing binaries instead
+                        // of the 7.7 GB full workspace that took ~8 min to stash.
                         stash(includes: "ws_${platform}/", name: "${platform}_build")
                     }
                 }
