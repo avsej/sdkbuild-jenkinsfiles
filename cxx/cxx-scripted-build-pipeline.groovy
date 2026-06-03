@@ -330,17 +330,30 @@ def pruneForStash() {
 
 
 // Best-effort docker-side post-mortem, run when cluster bring-up fails or
-// times out. Build #12's failure mode was unobservable from the cbdinocluster
-// log alone: `alloc -v` went silent at "waiting for it to get ready" for
-// ~13 minutes and then the stage timeout killed it — no record of whether
-// the server processes were starting slowly, OOM-looping, or wedged. This
-// dumps, for every couchbase/server container on the agent: docker status,
-// host memory/disk pressure, the last log lines, and HTTP probes of the
-// management ports (8091 plain, 18091 TLS — status 200/401 means the REST
-// endpoint is up; 000 means nothing is listening, i.e. the server never
-// came up). DIAGNOSTIC ONLY: set +e / exit 0, never fails the stage, and
-// must stay cheap — it runs inside a catch while failFast may be tearing
-// the build down around it.
+// times out. Build #13 proved what this is FOR: the servers came up fine
+// (every node logged "Starting Couchbase Server", live processes in docker
+// stats) yet the agent-side probe got HTTP 000 on 8091 for all of them —
+// INCLUDING build #12's nodes that had been Up 2 hours. A 2-hour-old
+// Couchbase is certainly listening, so 000 there is conclusive: the Jenkins
+// agent container cannot ROUTE to the cbdynnode containers. The agent talks
+// to the host docker daemon over the mounted socket, so nodes land on a host
+// bridge network (172.19.0.0/16) the swarm-service agent container is not
+// attached to; cbdinocluster's readiness poll runs inside the agent, hits
+// the same 000, and spins until the bring-up cap fires.
+//
+// So this dumps three things, in increasing diagnostic power:
+//   1. container status + host memory/disk pressure (rule out OOM / full disk)
+//   2. per node: agent-side 8091/18091 probe AND a server-SELF probe run
+//      inside the container (docker exec curl localhost) — the pair
+//      disambiguates "server down" (both fail) from "agent can't route"
+//      (self 200/401, agent 000), which is the build #13 signature.
+//   3. network topology + a REMEDIATION PROBE: connect the agent to the
+//      nodes' network and re-probe. If 000 flips to 401, `docker network
+//      connect` is the fix and the next build can promote it into bring-up
+//      proper (it cannot help THIS run — readiness already timed out).
+//
+// DIAGNOSTIC ONLY: set +e / exit 0, never fails the stage, stays cheap —
+// it runs inside a catch while failFast may be tearing the build down.
 def collectDockerDiagnostics() {
     sh '''
         set +e
@@ -350,6 +363,13 @@ def collectDockerDiagnostics() {
         free -h 2>/dev/null
         df -h . 2>/dev/null
         docker stats --no-stream 2>/dev/null | head -10
+
+        echo "----- network topology -----"
+        docker network ls 2>/dev/null
+        self="${HOSTNAME}"
+        echo "agent container: $self"
+        docker inspect -f "agent networks: {{range \\$k,\\$v := .NetworkSettings.Networks}}{{\\$k}}({{\\$v.IPAddress}}) {{end}}" "$self" 2>/dev/null
+
         # Select by container NAME, not image: cbdinocluster deploys by image
         # ID (deployOpts ImagePath sha256:...), so Config.Image is a bare sha
         # that never matches *couchbase* — verified live against a local
@@ -358,12 +378,30 @@ def collectDockerDiagnostics() {
         for c in $(docker ps -q --filter "name=cbdynnode" 2>/dev/null); do
             ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}" "$c" 2>/dev/null | awk "{print \\$1}")
             name=$(docker inspect -f "{{.Name}}" "$c" 2>/dev/null)
-            echo "----- container $name ($c) ip=$ip -----"
-            echo "8091 (plain): HTTP $(curl -m 5 -s -o /dev/null -w "%{http_code}" "http://$ip:8091/pools" 2>/dev/null)"
-            echo "18091 (TLS):  HTTP $(curl -m 5 -k -s -o /dev/null -w "%{http_code}" "https://$ip:18091/pools" 2>/dev/null)"
+            net=$(docker inspect -f "{{range \\$k,\\$v := .NetworkSettings.Networks}}{{\\$k}} {{end}}" "$c" 2>/dev/null | awk "{print \\$1}")
+            echo "----- container $name ($c) ip=$ip net=$net -----"
+            echo "from agent      8091: HTTP $(curl -m 5 -s -o /dev/null -w "%{http_code}" "http://$ip:8091/pools" 2>/dev/null)"
+            echo "from agent     18091: HTTP $(curl -m 5 -k -s -o /dev/null -w "%{http_code}" "https://$ip:18091/pools" 2>/dev/null)"
+            # Server-self probe: proves the REST port is up from inside the
+            # node, independent of agent->node routing. Empty result = curl
+            # absent from the image, not a failure.
+            echo "from inside     8091: HTTP $(docker exec "$c" curl -m 5 -s -o /dev/null -w "%{http_code}" "http://localhost:8091/pools" 2>/dev/null)"
             echo "--- last 25 log lines ---"
             docker logs --tail 25 "$c" 2>&1 | tail -25
         done
+
+        # Remediation probe — confirm the network-isolation hypothesis and
+        # test its fix in one shot. Connecting the agent to the nodes' network
+        # should flip the agent-side probe from 000 to 401. Leaves the agent
+        # attached (harmless; stale links to removed networks self-clean).
+        first=$(docker ps -q --filter "name=cbdynnode" 2>/dev/null | head -1)
+        if [ -n "$first" ]; then
+            net=$(docker inspect -f "{{range \\$k,\\$v := .NetworkSettings.Networks}}{{\\$k}} {{end}}" "$first" 2>/dev/null | awk "{print \\$1}")
+            ip=$(docker inspect -f "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}" "$first" 2>/dev/null | awk "{print \\$1}")
+            echo "----- remediation probe: docker network connect $net $self -----"
+            docker network connect "$net" "$self" 2>&1
+            echo "after connect,  8091: HTTP $(curl -m 5 -s -o /dev/null -w "%{http_code}" "http://$ip:8091/pools" 2>/dev/null) (000->401 means: promote this connect into bring-up)"
+        fi
         exit 0
     '''
 }
@@ -998,6 +1036,15 @@ if (!SKIP_TESTS.toBoolean()) {
                 // from the test stage to the cluster.
                 node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                     def CLUSTER = new DynamicCluster(version)
+                    // Per-job cbdinocluster config. v0.0.115+ resolves
+                    // CBDINOCLUSTER_CONFIG (env) ahead of the default
+                    // ~/.cbdinocluster, so every cbdinocluster call in the bring-up
+                    // and cleanup below reads/writes a workspace-local file instead
+                    // of the shared home-dir config that co-tenant SDK jobs on this
+                    // swarm agent also use. That isolation is what lets
+                    // generate_cbdinocluster_config.py rewrite the docker network
+                    // (build #13 fix) without clobbering anyone else's config.
+                    withEnv(["CBDINOCLUSTER_CONFIG=${env.WORKSPACE}/.cbdinocluster-cxx"]) {
                     try {
                         stage(label) {
                             reportExecutingNode()
@@ -1087,8 +1134,22 @@ expiry: 2h
                             // file from groovy interpolation by hand.
                             sh("cat cluster.yaml")
 
-                            // init is idempotent; safe to re-run on any agent picking up this label.
-                            sh("cbdinocluster -v init --auto")
+                            // Generate the per-job cbdinocluster config (written to
+                            // $CBDINOCLUSTER_CONFIG) instead of `cbdinocluster init --auto`.
+                            // init --auto auto-picks a docker network ("fit") the swarm
+                            // agent is NOT attached to, leaving cluster nodes healthy but
+                            // unreachable (build #13: HTTP 000 for 25 min). This script
+                            // copies the shared ~/.cbdinocluster, rewrites docker.network to
+                            // a network the agent actually shares, disables the Capella
+                            // deployer (unmanaged creds → cleanup FATAL), prints the docker
+                            // network inventory it decided from BEFORE writing, and fails
+                            // fast if no usable shared network exists (beats a 25-min hang).
+                            sh('''
+                                python3 pipeline-scripts/cxx/scripts/generate_cbdinocluster_config.py \\
+                                    --source "$HOME/.cbdinocluster" \\
+                                    --output "$CBDINOCLUSTER_CONFIG" \\
+                                    --agent-container "$(hostname)"
+                            ''')
                             // Reap anything past its expiry that earlier builds left behind
                             // (interrupted allocs can't be rm'd by their own cleanup stage —
                             // no id). Runs before OUR alloc so the leaked clusters' RAM and
@@ -1279,6 +1340,7 @@ expiry: 2h
                             }
                         }
                     }
+                    }  // withEnv CBDINOCLUSTER_CONFIG
                 }
             }
         }

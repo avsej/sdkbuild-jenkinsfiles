@@ -1,11 +1,11 @@
 {
-  "version": "v0.0.114",
+  "version": "v0.0.115",
   "sha256": {
-    "cbdinocluster-darwin-amd64": "66d183eac19593c2640b10fdc52cabaa0e2cef61fed2ebc614187a8788ee2653",
-    "cbdinocluster-darwin-arm64": "cbede12f08bc25b7c3e1e4e74057f52065712bcb67ad4e61982d3dc10bdf5dc3",
-    "cbdinocluster-linux-amd64": "87a24ca2c3c857d49c0ea450a5bab648fcd56f66568657ee7c4c0def22b90fd6",
-    "cbdinocluster-linux-arm64": "6b552b8a12075314b414840dabd2cb8ed0c04e58f0ad36aaa215af1a7910b24f",
-    "cbdinocluster-windows-amd64.exe": "0c7a3ba8f882b5e95322b4c01f9220a8edd03eb1b59fe4701d571341f49446db",
-    "cbdinocluster-windows-arm64.exe": "c44d77473ba027943f5178aea4dd729ab1f4ba677d8c2ecce9e56856cbc46cc8"
+    "cbdinocluster-darwin-amd64": "c347c05c714db64b33665710ce71d2b4d436df4db962c2d9687330165992e705",
+    "cbdinocluster-darwin-arm64": "e6fd64fb0c575461ece89565cc58623eade29e16ca6a71f47ca767c03e0e5a91",
+    "cbdinocluster-linux-amd64": "415097840b7c19d808bd86ccba2f0da1cf59c9ee23e48a823a939f8edf0cf836",
+    "cbdinocluster-linux-arm64": "e14d86905b99d977c6806999a0c5a4d8d62ef714f98b4bf3cd9fbbe56f1b36c0",
+    "cbdinocluster-windows-amd64.exe": "0b5b92f3e57ad0665e5853d225322d0f38d4075b2d5032b7d442f0e6678a20e2",
+    "cbdinocluster-windows-arm64.exe": "95082b11f240761e31fc1da9e2728b7b103121d548980e749fbb229a259e9cce"
   }
 }
