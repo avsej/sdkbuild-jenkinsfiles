@@ -407,6 +407,50 @@ def collectDockerDiagnostics() {
 }
 
 
+// Upfront docker/network environment report, run once at the start of every
+// docker integration bring-up (not just on failure). The cluster-reachability
+// saga (builds #13–#17) kept turning on facts we did NOT have in the log:
+// whether the daemon is a swarm manager or worker (overlay ops need a
+// manager), which networks the agent is on and with what IP/gateway, the
+// agent's routing table, and docker_gwbridge's subnet (the build #18
+// experiment target). Capture all of it up front so the next iteration starts
+// from data instead of guesses. DIAGNOSTIC ONLY: set +e / exit 0, never fails
+// the stage. Go templates use literal {{$k}} — fine inside a non-interpolating
+// groovy ''' string; only backslashes would need escaping, and there are none.
+def reportDockerEnvironment() {
+    sh '''
+        set +e
+        echo "===== docker / network environment report ====="
+        self="$(hostname)"
+        echo "--- daemon (version / storage / swarm role) ---"
+        docker version --format 'client={{.Client.Version}} server={{.Server.Version}}' 2>/dev/null
+        docker info --format 'storage={{.Driver}} swarm={{.Swarm.LocalNodeState}} isManager={{.Swarm.ControlAvailable}} nodeID={{.Swarm.NodeID}} cpus={{.NCPU}} mem={{.MemTotal}}' 2>/dev/null
+        echo "--- this agent container: $self ---"
+        docker inspect "$self" --format 'id={{.Id}} name={{.Name}} image={{.Config.Image}}' 2>/dev/null \
+            || echo "(could not inspect self by hostname — agent may not be a directly-named container)"
+        echo "--- agent network attachments (name / ip / gateway) ---"
+        docker inspect "$self" --format '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}(ip={{$v.IPAddress}} gw={{$v.Gateway}}) {{end}}' 2>/dev/null
+        echo "--- agent routing table (default route decides reachability) ---"
+        ip route 2>/dev/null || true
+        echo "--- agent resolv.conf ---"
+        cat /etc/resolv.conf 2>/dev/null || true
+        echo "--- all networks (driver / attachable / internal / scope / subnet) ---"
+        for n in $(docker network ls --format '{{.Name}}'); do
+            echo "  $n: $(docker network inspect "$n" --format 'driver={{.Driver}} attachable={{.Attachable}} internal={{.Internal}} scope={{.Scope}} subnet={{range .IPAM.Config}}{{.Subnet}} {{end}}' 2>/dev/null)"
+        done
+        echo "--- docker_gwbridge (build #18 experiment target): containers attached ---"
+        docker network inspect docker_gwbridge --format 'subnet={{range .IPAM.Config}}{{.Subnet}} {{end}}containers={{range $id,$c := .Containers}}{{$c.Name}}({{$c.IPv4Address}}) {{end}}' 2>/dev/null \
+            || echo "(docker_gwbridge not present — not a swarm host?)"
+        echo "--- existing cbdynnode containers ---"
+        docker ps -a --filter name=cbdynnode --format '{{.ID}} {{.Status}} {{.Names}}' 2>/dev/null
+        echo "--- docker disk usage ---"
+        docker system df 2>/dev/null
+        echo "===== end environment report ====="
+        exit 0
+    '''
+}
+
+
 // Pin cbdinocluster on the current agent by invoking the cross-platform
 // installer at cxx/scripts/install_cbdinocluster.py. The script reads the
 // pinned version and per-asset SHA-256 map from cxx/scripts/cbdinocluster.json
@@ -1036,12 +1080,6 @@ if (!SKIP_TESTS.toBoolean()) {
                 // from the test stage to the cluster.
                 node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
                     def CLUSTER = new DynamicCluster(version)
-                    // Per-job docker bridge for agent<->node reachability (build #16 fix).
-                    // Unique per build+lane so concurrent co-tenant lanes that land on the
-                    // same swarm host never collide on this host-global network name.
-                    // Created in the bring-up below, attached to this agent, handed to
-                    // cbdinocluster via --prefer, and torn down in the cleanup stage.
-                    def DOCKER_NET = "cxxcbc-${BUILD_NUMBER}-${COMBINATION_PLATFORM}-${label}".replaceAll(/[^A-Za-z0-9_.-]/, '-')
                     // Per-job cbdinocluster config. v0.0.115+ resolves
                     // CBDINOCLUSTER_CONFIG (env) ahead of the default
                     // ~/.cbdinocluster, so every cbdinocluster call in the bring-up
@@ -1140,46 +1178,36 @@ expiry: 2h
                             // file from groovy interpolation by hand.
                             sh("cat cluster.yaml")
 
-                            // The agent's only shared network on these swarm hosts is the
-                            // non-attachable overlay sdkqe_jenkins, which standalone
-                            // cbdinocluster node containers cannot join — so build #16 hit
-                            // the generator's fail-fast gate (no usable shared network) and
-                            // the cluster never came up. Manufacture the missing network:
-                            // a per-job user-defined bridge (embedded DNS, score 100) that
-                            // both this agent and the cluster nodes attach to.
+                            // Full docker/network environment snapshot before we touch
+                            // anything — swarm role, agent IPs/gateways/routing, per-network
+                            // detail, docker_gwbridge membership. Cheap, always-on; the
+                            // reachability work keeps needing this data after the fact.
+                            reportDockerEnvironment()
+
+                            // EXPERIMENT (build #18): pin the cluster to docker_gwbridge — the
+                            // swarm gateway bridge that EVERY task on the host, including this
+                            // agent, is already attached to. Nodes created there share an L3
+                            // network with the agent with ZERO mutation of the agent's own
+                            // network set. That constraint is hard-won: build #17 connected the
+                            // agent to a fresh per-job bridge and the `docker network connect`
+                            // severed the agent from the Jenkins controller, killing every lane.
                             //
-                            // Reaper first: rm any cxxcbc-* bridge a crashed earlier build
-                            // orphaned. `network rm` only removes a bridge with no live
-                            // endpoints, so a concurrent lane's in-use network is skipped
-                            // harmlessly. Then force-clear our exact name (a same-named
-                            // bridge from a prior run on this host may still hold our agent
-                            // endpoint) so the create is idempotent.
-                            sh("""
-                                set -eu
-                                for n in \$(docker network ls --filter name=cxxcbc- --format '{{.Name}}'); do
-                                    docker network rm "\$n" 2>/dev/null || true
-                                done
-                                docker network disconnect -f ${DOCKER_NET} "\$(hostname)" 2>/dev/null || true
-                                docker network rm ${DOCKER_NET} 2>/dev/null || true
-                                docker network create --driver bridge ${DOCKER_NET} >/dev/null
-                                docker network connect ${DOCKER_NET} "\$(hostname)"
-                                echo "created per-job docker bridge ${DOCKER_NET} and attached agent \$(hostname)"
-                            """)
-                            // Generate the per-job cbdinocluster config (written to
-                            // $CBDINOCLUSTER_CONFIG) instead of `cbdinocluster init --auto`.
-                            // --prefer pins docker.network to the bridge created above; the
-                            // generator still validates the agent is attached to it and
-                            // fails fast otherwise. It copies the shared ~/.cbdinocluster,
-                            // disables the Capella deployer (unmanaged creds → cleanup
-                            // FATAL), and prints the docker network inventory it decided
-                            // from BEFORE writing.
-                            sh("""
+                            // --prefer docker_gwbridge is authoritative: the generator pins
+                            // docker.network to it (validating the agent is attached) even
+                            // though it is normally skipped. Unknowns this build will answer:
+                            // whether the docker daemon lets standalone cbdinocluster node
+                            // containers attach to docker_gwbridge at all, and whether they get
+                            // working inter-node connectivity. If not, the post-mortem's per-node
+                            // 8091/18091 + server-self probes will show exactly how it failed.
+                            // Copies the shared ~/.cbdinocluster, disables Capella, and prints
+                            // the docker network inventory BEFORE writing.
+                            sh('''
                                 python3 pipeline-scripts/cxx/scripts/generate_cbdinocluster_config.py \\
-                                    --source "\$HOME/.cbdinocluster" \\
-                                    --output "\$CBDINOCLUSTER_CONFIG" \\
-                                    --agent-container "\$(hostname)" \\
-                                    --prefer ${DOCKER_NET}
-                            """)
+                                    --source "$HOME/.cbdinocluster" \\
+                                    --output "$CBDINOCLUSTER_CONFIG" \\
+                                    --agent-container "$(hostname)" \\
+                                    --prefer docker_gwbridge
+                            ''')
                             // Reap anything past its expiry that earlier builds left behind
                             // (interrupted allocs can't be rm'd by their own cleanup stage —
                             // no id). Runs before OUR alloc so the leaked clusters' RAM and
@@ -1353,37 +1381,20 @@ expiry: 2h
                         }
                     } finally {
                         stage("cleanup") {
-                            try {
-                                // Guard the rm: alloc may have failed before CLUSTER.id_ was set, in
-                                // which case `cbdinocluster rm ""` would either error and mask the
-                                // real failure, or no-op silently. The guard mirrors the alloc
-                                // validation above and keeps the original exception intact.
-                                if (CLUSTER.clusterId()) {
-                                    sh("cbdinocluster rm ${CLUSTER.clusterId()}")
-                                } else {
-                                    echo("skipping cbdinocluster rm: cluster id was never set")
-                                    // The id-less case is exactly the one that leaks (build #12:
-                                    // alloc SIGTERM'd mid-ready-wait left 3 running containers).
-                                    // We can't rm what we can't name, but we can reap whatever
-                                    // is already past expiry — ours from a previous round, or
-                                    // older builds'. Best-effort: never mask the original error.
-                                    sh("cbdinocluster cleanup || true")
-                                }
-                            } finally {
-                                // Tear down the per-job docker bridge created for agent<->node
-                                // reachability. In a finally so it runs even when the rm above
-                                // throws (rm is intentionally not ||true — its failures must stay
-                                // visible). Unconditional: the bridge can exist even when alloc
-                                // never ran (gate/connect failure), and a leaked docker network is
-                                // invisible to cbdinocluster's expiry reaper, so nothing else will
-                                // ever remove it. The cluster nodes — the bridge's other endpoints
-                                // — were removed just above, leaving the agent as the last
-                                // endpoint; force-disconnect it, then rm. Every step ||true: this
-                                // is teardown, it must never replace the failure that sent us here.
-                                sh("""
-                                    docker network disconnect -f ${DOCKER_NET} "\$(hostname)" 2>/dev/null || true
-                                    docker network rm ${DOCKER_NET} 2>/dev/null || true
-                                """)
+                            // Guard the rm: alloc may have failed before CLUSTER.id_ was set, in
+                            // which case `cbdinocluster rm ""` would either error and mask the
+                            // real failure, or no-op silently. The guard mirrors the alloc
+                            // validation above and keeps the original exception intact.
+                            if (CLUSTER.clusterId()) {
+                                sh("cbdinocluster rm ${CLUSTER.clusterId()}")
+                            } else {
+                                echo("skipping cbdinocluster rm: cluster id was never set")
+                                // The id-less case is exactly the one that leaks (build #12:
+                                // alloc SIGTERM'd mid-ready-wait left 3 running containers).
+                                // We can't rm what we can't name, but we can reap whatever
+                                // is already past expiry — ours from a previous round, or
+                                // older builds'. Best-effort: never mask the original error.
+                                sh("cbdinocluster cleanup || true")
                             }
                         }
                     }

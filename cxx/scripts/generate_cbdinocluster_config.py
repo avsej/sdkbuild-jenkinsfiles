@@ -128,7 +128,15 @@ def choose_network(inventory, on_agent, prefer):
             return None, 0, "preferred network '%s' does not exist on this host" % prefer
         if prefer not in on_agent:
             return None, 0, "preferred network '%s' exists but the agent is not attached to it" % prefer
+        # --prefer is authoritative: the caller has decided this network is the
+        # right one (e.g. docker_gwbridge, the swarm gateway both the agent and
+        # nodes can share without mutating the agent). Honor it even when the
+        # heuristic would skip or down-rank it, but surface what the heuristic
+        # thinks so the log still flags a questionable choice.
         score, reason = score_network(prefer, inventory[prefer])
+        if score == 0:
+            return prefer, 1, ("explicitly preferred (heuristic would skip it: %s) — "
+                               "trusting --prefer" % reason)
         return prefer, score, "explicitly preferred; " + reason
 
     best = (None, 0, "the agent shares no usable network with the docker host")
