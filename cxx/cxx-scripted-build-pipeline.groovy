@@ -68,15 +68,19 @@ def CB_VERSIONS = [
     "80stable":  [tag: "8.0.1",  ceTag: "8.0.1",  label: "8.0-stable"]
 ]
 def COMBINATION_PLATFORM = "rocky9-amd64"
-// Jenkins label for the COMBINATION_PLATFORM stages (unit tests, integration
-// cluster bring-up, Capella). Defaults to the historical QE pool
-// sdkqe-<executor>, but is overridable from the build form: add a String job
-// parameter named COMBINATION_LABEL and its value wins. The sdkqe-rockylinux9
-// cloud template was removed (builds #18/#19 aborted: "There are no nodes with
-// the label 'sdkqe-rockylinux9'"), so this lets the pool be repointed without a
-// code change while the QE infra is in flux. params.COMBINATION_LABEL is null
-// when the parameter isn't defined on the job, so the default applies cleanly.
-def COMBINATION_LABEL = (params.COMBINATION_LABEL?.trim()) ?: "sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
+// Jenkins label for the integration cluster bring-up + Capella stages.
+// Defaults to the plain build pool (<executor>, e.g. rockylinux9) rather than
+// the historical QE pool sdkqe-<executor>: the sdkqe-rockylinux9 cloud template
+// was removed and builds #18-#20 aborted at scheduling ("There are no nodes
+// with the label 'sdkqe-rockylinux9'"). Pointing at a pool that exists lets the
+// stage actually start and report its environment; whether that agent can host
+// a cluster (docker + cbdinocluster) is then visible in reportDockerEnvironment
+// rather than hidden behind a scheduling abort. (#18 evidence suggested the
+// build image lacks the docker CLI — if so the bring-up fails loudly at
+// `docker --version`, which is the data we want.) Overridable from the build
+// form via a COMBINATION_LABEL job parameter once a docker-capable label is
+// known. params.COMBINATION_LABEL is null when undefined, so the default holds.
+def COMBINATION_LABEL = (params.COMBINATION_LABEL?.trim()) ?: "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 // Unit tests only need the built binary + ctest — no docker, no cbdinocluster —
 // so they run on the plain build pool (<executor>, e.g. rockylinux9) by default
 // rather than the AWS-provisioned sdkqe-* pool, which is both flaky and (builds
@@ -188,7 +192,16 @@ def checkoutPipelineRepo() {
 // answer?"). HOSTNAME and CONTAINER_TAG are populated by the agent
 // provisioner and distinguish container-on-host situations where
 // NODE_NAME alone is ambiguous.
-def reportExecutingNode() {
+def reportExecutingNode(String requestedLabel = null) {
+    // The label we ASKED Jenkins for is a groovy value, not an env var on the
+    // agent, so reportExecutingNode's sh dump below (which shows the labels the
+    // host ADVERTISES) never reveals it. Echo it explicitly: when a stage can't
+    // be correlated to a pool ("which label is integration even using?"), this
+    // is the missing half — requested label vs. the NODE_LABELS the host
+    // actually answered with.
+    if (requestedLabel != null) {
+        echo("requested node label: ${requestedLabel}")
+    }
     if (isUnix()) {
         sh '''
             echo "HOSTNAME=${HOSTNAME}"
@@ -671,7 +684,7 @@ stage("prepare and validate") {
         cleanWs()
 
         stage("environment") {
-            reportExecutingNode()
+            reportExecutingNode(TARBALL_LABEL)
             // DIAGNOSTIC ONLY — `set +e` + `exit 0` deliberately swallows missing-tool
             // errors so the build log shows what *is* present rather than failing at the
             // first absent binary. Do not add load-bearing commands inside this heredoc;
@@ -760,7 +773,7 @@ stage("build matrix") {
                 // generous enough to hide a real hang.
                 timeout(unit: 'MINUTES', time: 45) {
                 stage("prep") {
-                    reportExecutingNode()
+                    reportExecutingNode(PLATFORM_EXECUTOR[platform])
                     // Before the disk gate on purpose: if the gate trips, the probe's
                     // ccache-size / marker output is exactly the context that explains
                     // *why* the agent is full.
@@ -1056,7 +1069,7 @@ if (!SKIP_TESTS.toBoolean()) {
     node(UNIT_LABEL) {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
-                reportExecutingNode()
+                reportExecutingNode(UNIT_LABEL)
                 unstash("${COMBINATION_PLATFORM}_build")
                 withEnv([
                     "CTEST_OUTPUT_ON_FAILURE=1",
@@ -1108,7 +1121,7 @@ if (!SKIP_TESTS.toBoolean()) {
                     withEnv(["CBDINOCLUSTER_CONFIG=${env.WORKSPACE}/.cbdinocluster-cxx"]) {
                     try {
                         stage(label) {
-                            reportExecutingNode()
+                            reportExecutingNode(COMBINATION_LABEL)
                             reportPersistence()
                             // 25-min cap on the cluster bring-up: docker version, ensure*,
                             // cbdinocluster init/alloc/buckets-add/cert-fetch/connstr, and the
@@ -1436,7 +1449,7 @@ expiry: 2h
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
-                        reportExecutingNode()
+                        reportExecutingNode(COMBINATION_LABEL)
                         reportPersistence()
                         // 15-min cap on Capella bring-up — covers ensure*, init, the cloud
                         // alloc round-trip (slower than docker; AWS may take minutes), bucket
