@@ -1604,3 +1604,89 @@ expiry: 4h
         }
     }
 }
+
+
+// One-off, opt-in experiment (set the boolean build parameter PROBE_DOCKER):
+// the rockylinux9 build pool has the compiler toolchain but no docker CLI and
+// no cbdinocluster (builds #20/#21: "docker: command not found"), so
+// integration can't run there. This probes the decisive questions for the
+// Build/IT team before they rebuild the image: (1) is a docker daemon socket
+// present in the build container, (2) can a docker CLI be added on top of it
+// (the way IT would bake it in), and (3) does that CLI actually create a
+// container — the core capability cbdinocluster needs. Best-effort: set +e /
+// exit 0 throughout, so it never fails the build; read the "PROBE RESULT:"
+// lines. If it reports WORKING, baking docker into the image is enough for the
+// existing integration lanes to run (point COMBINATION_LABEL at this pool).
+if (params.PROBE_DOCKER?.toBoolean()) {
+    node(UNIT_LABEL) {
+        stage("docker probe (rockylinux9)") {
+            reportExecutingNode(UNIT_LABEL)
+            sh '''
+                set +e
+                echo "===== docker install probe on $(hostname) ====="
+                echo "--- identity / privileges ---"
+                id
+                echo "sudo: $(command -v sudo || echo none)"
+                sudo -n true 2>/dev/null && echo "passwordless sudo: yes" || echo "passwordless sudo: no"
+
+                echo "--- docker daemon socket (the thing IT cannot add via a CLI alone) ---"
+                if [ -S /var/run/docker.sock ]; then
+                    ls -l /var/run/docker.sock
+                    echo "socket: PRESENT"
+                else
+                    echo "socket: ABSENT — no daemon to talk to; adding a CLI alone will not help"
+                fi
+
+                echo "--- existing docker CLI ---"
+                command -v docker >/dev/null && docker --version || echo "docker CLI absent (expected on build pool)"
+
+                echo "--- attempt 1: dnf docker-ce-cli (closest to how IT would package it) ---"
+                if command -v dnf >/dev/null; then
+                    sudo dnf -y install dnf-plugins-core 2>&1 | tail -3
+                    sudo dnf -y config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo 2>&1 | tail -3
+                    sudo dnf -y install docker-ce-cli 2>&1 | tail -6
+                else
+                    echo "dnf absent"
+                fi
+                command -v docker >/dev/null && docker --version || echo "dnf path did not yield a docker CLI"
+
+                echo "--- attempt 2 (fallback): static docker client binary ---"
+                if ! command -v docker >/dev/null; then
+                    ver=27.3.1
+                    mkdir -p "$HOME/bin"
+                    if curl -fsSL "https://download.docker.com/linux/static/stable/x86_64/docker-${ver}.tgz" -o /tmp/docker.tgz \
+                        && tar -xzf /tmp/docker.tgz -C /tmp docker/docker; then
+                        sudo install -m0755 /tmp/docker/docker /usr/local/bin/docker 2>/dev/null \
+                            || install -m0755 /tmp/docker/docker "$HOME/bin/docker"
+                        echo "installed static docker client $ver"
+                    else
+                        echo "static binary download/extract failed"
+                    fi
+                fi
+
+                export PATH="$HOME/bin:/usr/local/bin:$PATH"
+                if ! command -v docker >/dev/null; then
+                    echo "PROBE RESULT: could NOT obtain a docker CLI on this pool"
+                    exit 0
+                fi
+                echo "obtained docker CLI: $(command -v docker) $(docker --version)"
+
+                echo "--- does the CLI reach a daemon? ---"
+                docker version 2>&1 | head -25
+                docker info --format 'server={{.ServerVersion}} storage={{.Driver}} swarm={{.Swarm.LocalNodeState}} root={{.DockerRootDir}}' 2>&1
+                docker network ls 2>&1
+
+                echo "--- can it actually create a container? (cbdinocluster's core need) ---"
+                if docker run --rm alpine:3.21 echo PROBE_CONTAINER_OK 2>&1 | tail -8 | grep -q PROBE_CONTAINER_OK; then
+                    echo "PROBE RESULT: WORKING — docker CLI + daemon can create containers."
+                    echo "PROBE RESULT: integration is viable here once docker is baked into the image;"
+                    echo "PROBE RESULT: then set COMBINATION_LABEL to this pool and the existing lanes run."
+                else
+                    echo "PROBE RESULT: docker CLI present but could NOT run a container (daemon unreachable or insufficient privileges) — needs the socket mounted / proper perms, not just the CLI"
+                fi
+                echo "===== end docker install probe ====="
+                exit 0
+            '''
+        }
+    }
+}
