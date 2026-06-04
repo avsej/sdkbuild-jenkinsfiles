@@ -68,6 +68,23 @@ def CB_VERSIONS = [
     "80stable":  [tag: "8.0.1",  ceTag: "8.0.1",  label: "8.0-stable"]
 ]
 def COMBINATION_PLATFORM = "rocky9-amd64"
+// Jenkins label for the COMBINATION_PLATFORM stages (unit tests, integration
+// cluster bring-up, Capella). Defaults to the historical QE pool
+// sdkqe-<executor>, but is overridable from the build form: add a String job
+// parameter named COMBINATION_LABEL and its value wins. The sdkqe-rockylinux9
+// cloud template was removed (builds #18/#19 aborted: "There are no nodes with
+// the label 'sdkqe-rockylinux9'"), so this lets the pool be repointed without a
+// code change while the QE infra is in flux. params.COMBINATION_LABEL is null
+// when the parameter isn't defined on the job, so the default applies cleanly.
+def COMBINATION_LABEL = (params.COMBINATION_LABEL?.trim()) ?: "sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
+// Unit tests only need the built binary + ctest — no docker, no cbdinocluster —
+// so they run on the plain build pool (<executor>, e.g. rockylinux9) by default
+// rather than the AWS-provisioned sdkqe-* pool, which is both flaky and (builds
+// #18/#19) sometimes has no template at all. The build pool was verified to
+// lack docker/cbdinocluster, which is fine for unit tests but is exactly why
+// integration below must stay on COMBINATION_LABEL. Overridable via a
+// UNIT_LABEL job parameter.
+def UNIT_LABEL = (params.UNIT_LABEL?.trim()) ?: "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
 // Every node(...) expression in this file is a Jenkins LABEL, not a node
 // identifier — and a label can match multiple physical agents. Jenkins
 // picks one matching agent when a node() block enters; a SECOND node()
@@ -83,10 +100,10 @@ def COMBINATION_PLATFORM = "rocky9-amd64"
 // (<executor>) and the test-agent label (sdkqe-<executor>). The other
 // COMBINATION_PLATFORM stages — unit tests, integration-test cluster
 // bring-up, Capella — consume the platform-specific build binary or need
-// the test-agent toolchain (docker, cbdinocluster) and stay strict on
-// sdkqe-. Their bring-up + test + cleanup also stay inside one node()
-// block; see the cbverStages comments for why.
-def TARBALL_LABEL = "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}"
+// the test-agent toolchain (docker, cbdinocluster) and run on
+// COMBINATION_LABEL (above). Their bring-up + test + cleanup also stay
+// inside one node() block; see the cbverStages comments for why.
+def TARBALL_LABEL = "${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]} || ${COMBINATION_LABEL}"
 
 // Per-platform disk threshold (GB free on workspace drive) required
 // before a build proceeds. Keyed by the user-facing platform IDs (the
@@ -1036,7 +1053,7 @@ class DynamicCluster {
 
 
 if (!SKIP_TESTS.toBoolean()) {
-    node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+    node(UNIT_LABEL) {
         timeout(unit: 'MINUTES', time: 10) {
             stage("unit tests") {
                 reportExecutingNode()
@@ -1078,7 +1095,7 @@ if (!SKIP_TESTS.toBoolean()) {
                 // bring-up / test / cleanup trio inside this single node() block — splitting it
                 // across nodes leaks the cluster (rm has no record of it) and breaks TCP reach
                 // from the test stage to the cluster.
-                node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+                node(COMBINATION_LABEL) {
                     def CLUSTER = new DynamicCluster(version)
                     // Per-job cbdinocluster config. v0.0.115+ resolves
                     // CBDINOCLUSTER_CONFIG (env) ahead of the default
@@ -1415,7 +1432,7 @@ expiry: 2h
             // stored on the agent's local filesystem even when the cluster itself is in
             // the cloud. Allocating on one agent and running `cbdinocluster rm` on another
             // leaks the cluster — and a leaked Capella cluster bills the org until expiry.
-            node("sdkqe-${PLATFORM_EXECUTOR[COMBINATION_PLATFORM]}") {
+            node(COMBINATION_LABEL) {
                 def CLUSTER = new DynamicCluster("capella")
                 try {
                     stage("capella") {
